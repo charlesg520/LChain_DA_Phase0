@@ -1,0 +1,24 @@
+# SearXNG for HQ: private metasearch the agent's web_search tool calls.
+# Only reachable inside the Docker "edge" network (no published port).
+use_default_settings: true
+
+general:
+  instance_name: "HQ Search"
+
+server:
+  # Overridden by the SEARXNG_SECRET env var.
+  secret_key: "overridden-by-env"
+  limiter: false          # internal-only; rate limiting would throttle the agent
+  image_proxy: false
+  method: "GET"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json                # required by the web_search tool
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 15.0

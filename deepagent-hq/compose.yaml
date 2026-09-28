@@ -1,0 +1,138 @@
+# HQ stack. Sized for a 2 vCPU / 8 GB VPS (worst case ~7.5 GB with two busy sandboxes).
+#
+#   make up                 # core stack
+#   make up PROFILES=obs    # + Phoenix tracing
+#
+# Networks:
+#   internal  - no internet. Postgres, docker-proxy, Phoenix. Only the agent reaches them.
+#   edge      - internet egress. Caddy, agent, SearXNG.
+#   hq-sandbox (created by the agent) - where code runs. Shares nothing with the above.
+
+name: hq
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-hq}
+    volumes:
+      - pg_data:/var/lib/postgresql
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hq}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 768m
+    logging: *logging
+
+  agent:
+    build: ./agent
+    restart: unless-stopped
+    # Run as the host user that owns the repo so approved skill edits and memory
+    # files stay editable (and git-committable) on the host. `make init` fills these in.
+    user: "${HQ_UID:-10001}:${HQ_GID:-10001}"
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-hq}
+      POSTGRES_DB: ${POSTGRES_DB:-hq}
+      AEGRA_CONFIG: aegra.json
+      AUTH_TYPE: custom
+      ENV_MODE: PRODUCTION
+      HQ_DATA_DIR: /data
+      HQ_SKILLS_DIR: /data/skills
+      SEARXNG_URL: http://searxng:8080
+      # Home machine first (over Tailscale), VPS last. See README "Home node".
+      SANDBOX_DOCKER_HOSTS: ${SANDBOX_DOCKER_HOSTS:-tcp://docker-proxy:2375}
+    volumes:
+      - ./data/memories:/data/memories
+      - ./skills:/data/skills
+    networks: [internal, edge]
+    depends_on:
+      postgres: { condition: service_healthy }
+      docker-proxy: { condition: service_started }
+    mem_limit: 1536m
+    logging: *logging
+
+  # The agent never gets the raw Docker socket. This proxy only allows what the
+  # sandbox backend needs (containers, exec, archives, networks, volumes).
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      EXEC: 1
+      POST: 1
+      IMAGES: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+      ALLOW_RESTARTS: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [internal]
+    mem_limit: 64m
+    logging: *logging
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks: [edge]
+    mem_limit: 256m
+    logging: *logging
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      HQ_DOMAIN: ${HQ_DOMAIN:-localhost}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    depends_on: [agent]
+    mem_limit: 128m
+    logging: *logging
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    profiles: [obs]
+    restart: unless-stopped
+    environment:
+      PHOENIX_SQL_DATABASE_URL: postgresql://${POSTGRES_USER:-hq}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hq}
+      PHOENIX_SQL_DATABASE_SCHEMA: phoenix
+    ports:
+      - "127.0.0.1:6006:6006"  # reach it over SSH/Tailscale, never the public internet
+    networks: [internal, edge]
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: 768m
+    logging: *logging
+
+networks:
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  pg_data:
+  caddy_data:
+  caddy_config:

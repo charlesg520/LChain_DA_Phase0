@@ -1,0 +1,18 @@
+{
+  "name": "hq",
+  "dependencies": ["./src"],
+  "graphs": {
+    "hq": "./src/hq_agent/graph.py:make_graph"
+  },
+  "auth": {
+    "path": "./auth.py:auth"
+  },
+  "http": {
+    "app": "hq_agent.ops:app",
+    "enable_custom_route_auth": true,
+    "cors": {
+      "allow_origins": [],
+      "allow_credentials": false
+    }
+  }
+}

@@ -1,0 +1,33 @@
+# HQ home node: runs on your own machine so heavy sandboxes use your hardware.
+# The VPS reaches it only over Tailscale.
+#
+#   1. Install Tailscale on both machines and note this machine's 100.x.y.z IP.
+#   2. TAILSCALE_IP=100.x.y.z docker compose -f infra/home-node/compose.yaml up -d
+#   3. make sandbox-image        (build the sandbox image on this machine too)
+#   4. On the VPS, in .env:  SANDBOX_DOCKER_HOSTS=tcp://100.x.y.z:2375,tcp://docker-proxy:2375
+#
+# Optional: point OLLAMA_BASE_URL on the VPS at http://100.x.y.z:11434 and start
+# Ollama with OLLAMA_HOST=100.x.y.z so it also listens only on Tailscale.
+
+name: hq-home
+
+services:
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      EXEC: 1
+      POST: 1
+      IMAGES: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+      ALLOW_RESTARTS: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      # Bound to the Tailscale interface only. Never publish this on 0.0.0.0.
+      - "${TAILSCALE_IP:?set TAILSCALE_IP to this machine's Tailscale address}:2375:2375"
+    mem_limit: 64m

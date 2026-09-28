@@ -1,0 +1,34 @@
+# HQ edge proxy. Set HQ_DOMAIN in .env to a real domain pointed at the VPS and
+# Caddy gets a Let's Encrypt certificate automatically. With the default
+# "localhost" it serves a locally-trusted certificate for testing.
+
+{$HQ_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Agent Protocol + ops API. Bearer-token auth is enforced by the agent itself.
+	handle_path /api/* {
+		# Don't publish the API schema (Aegra serves it without auth).
+		@apidocs path /docs* /redoc* /openapi.json
+		respond @apidocs 404
+
+		reverse_proxy agent:8000 {
+			flush_interval -1          # stream SSE tokens immediately
+			transport http {
+				read_timeout 0         # long-running agent runs
+			}
+		}
+	}
+
+	# Phase 2 replaces this with the web UI (reverse_proxy web:3000).
+	handle {
+		respond "HQ is running. The web UI arrives in Phase 2." 200
+	}
+}
