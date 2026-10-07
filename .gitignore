@@ -7,3 +7,5 @@ backups/
 *.pyc
 node_modules/
 .next/
+secrets/*
+!secrets/*.example

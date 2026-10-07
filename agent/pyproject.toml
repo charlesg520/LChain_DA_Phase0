@@ -1,6 +1,6 @@
 [project]
 name = "hq-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Self-hosted DeepAgent: coding-first orchestrator with subagents, Docker sandboxes, and markets research."
 requires-python = ">=3.12,<3.13"
 
@@ -21,6 +21,8 @@ dependencies = [
     # aegra-api 0.6.0 uses SQLAlchemy asyncio but doesn't declare greenlet; the
     # server crashes at import without it (caught in the Phase 0 boot test).
     "greenlet==3.5.6",
+    "langchain-mcp-adapters==0.3.2",
+    "mcp==1.30.0",
 ]
 
 [dependency-groups]

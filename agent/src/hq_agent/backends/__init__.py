@@ -2,7 +2,7 @@
 
     /workspace/...   -> per-project Docker sandbox (code, builds, backtests)
     /memories/...    -> plain Markdown on the server's data volume (long-term memory)
-    /skills/...      -> SKILL.md folders, bind-mounted from the repo so upgrades show up in git
+    /skills/...      -> live SKILL.md folders (read-only to the agent; see skills_store.py)
 
 Memory and skills are plain files on purpose: you can read, edit, diff and back
 them up without any special tooling, and the UI can serve them directly.
@@ -20,11 +20,17 @@ MEMORIES_ROUTE = "/memories/"
 SKILLS_ROUTE = "/skills/"
 
 
-def build_backend(settings: Settings) -> CompositeBackend:
+def build_sandbox(settings: Settings) -> DockerSandbox | None:
+    return DockerSandbox(settings.sandbox) if settings.sandbox.enabled else None
+
+
+def build_backend(settings: Settings, sandbox: DockerSandbox | None = None) -> CompositeBackend:
     settings.memories_dir.mkdir(parents=True, exist_ok=True)
     settings.skills_dir.mkdir(parents=True, exist_ok=True)
 
-    default: BackendProtocol = DockerSandbox(settings.sandbox) if settings.sandbox.enabled else StateBackend()
+    if sandbox is None and settings.sandbox.enabled:
+        sandbox = DockerSandbox(settings.sandbox)
+    default: BackendProtocol = sandbox if sandbox is not None else StateBackend()
     return CompositeBackend(
         default=default,
         routes={
@@ -34,4 +40,4 @@ def build_backend(settings: Settings) -> CompositeBackend:
     )
 
 
-__all__ = ["DockerSandbox", "build_backend", "MEMORIES_ROUTE", "SKILLS_ROUTE"]
+__all__ = ["DockerSandbox", "build_backend", "build_sandbox", "MEMORIES_ROUTE", "SKILLS_ROUTE"]

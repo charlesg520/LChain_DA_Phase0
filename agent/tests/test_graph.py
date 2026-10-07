@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from hq_agent.config import load_settings
-from hq_agent.graph import build_agent, make_graph, skill_sources
+from hq_agent.graph import build_agent, make_graph, skill_sources, skill_store
 from tests.conftest import scripted, tool_call
 
 
@@ -64,7 +63,7 @@ def test_memory_writes_land_on_disk(hq_env: Path) -> None:
     assert saved.read_text() == "# Projects\n- demo\n"
 
 
-def test_skill_edits_pause_for_approval(hq_env: Path) -> None:
+def test_direct_skill_writes_are_denied(hq_env: Path) -> None:
     model = scripted(
         tool_call(
             "write_file",
@@ -73,13 +72,65 @@ def test_skill_edits_pause_for_approval(hq_env: Path) -> None:
         AIMessage(content="done"),
     )
     settings = load_settings()
-    # Same mechanism Aegra uses to inject its Postgres checkpointer.
-    agent = build_agent(settings, model_override=model).copy(update={"checkpointer": InMemorySaver()})
+    result = build_agent(settings, model_override=model).invoke({"messages": [HumanMessage("add a skill")]}, _config())
 
-    result = agent.invoke({"messages": [HumanMessage("add a skill")]}, _config("t-skill"))
+    denied = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert denied and "permission" in denied[0].content.lower()
+    assert not (settings.skills_dir / "coding" / "sneaky").exists()
 
-    assert "__interrupt__" in result, "writing to /skills/ must pause for human approval"
-    assert not (settings.skills_dir / "coding" / "sneaky" / "SKILL.md").exists()
+
+def test_agent_proposes_a_skill_and_it_waits_for_review(hq_env: Path) -> None:
+    skill = "---\nname: deploy-checklist\ndescription: Steps before any deploy. Use before deploying.\n---\n\n- run tests\n"
+    model = scripted(
+        tool_call("propose_skill", {"category": "coding", "name": "deploy-checklist", "skill_md": skill, "reason": "C asked twice"}),
+        AIMessage(content="proposed"),
+    )
+    settings = load_settings()
+    result = build_agent(settings, model_override=model).invoke({"messages": [HumanMessage("remember this")]}, _config())
+
+    reply = next(m for m in result["messages"] if isinstance(m, ToolMessage))
+    assert "waiting for C's review" in reply.content
+    assert not (settings.skills_dir / "coding" / "deploy-checklist").exists()  # not live until approved
+    store = skill_store(settings)
+    [pending] = store.list_proposals(status="pending")
+    store.approve(pending.id)
+    assert (settings.skills_dir / "coding" / "deploy-checklist" / "SKILL.md").read_text() == skill
+
+
+def test_bad_skill_proposals_come_back_as_fixable_errors(hq_env: Path) -> None:
+    model = scripted(
+        tool_call("propose_skill", {"category": "coding", "name": "x", "skill_md": "no frontmatter", "reason": "r"}),
+        AIMessage(content="ok"),
+    )
+    result = build_agent(load_settings(), model_override=model).invoke({"messages": [HumanMessage("hi")]}, _config())
+    reply = next(m for m in result["messages"] if isinstance(m, ToolMessage))
+    assert reply.content.startswith("Not proposed:") and "frontmatter" in reply.content
+
+
+def test_skill_approval_can_be_turned_off(hq_env: Path, monkeypatch) -> None:
+    monkeypatch.setenv("REQUIRE_SKILL_APPROVAL", "false")
+    skill = "---\nname: quick\ndescription: d\n---\nbody\n"
+    model = scripted(
+        tool_call("propose_skill", {"category": "coding", "name": "quick", "skill_md": skill, "reason": "r"}),
+        AIMessage(content="ok"),
+    )
+    settings = load_settings()
+    result = build_agent(settings, model_override=model).invoke({"messages": [HumanMessage("hi")]}, _config())
+    assert "live as version" in next(m for m in result["messages"] if isinstance(m, ToolMessage)).content
+    assert (settings.skills_dir / "coding" / "quick" / "SKILL.md").exists()
+
+
+def test_coder_sees_skills_and_can_propose(hq_env: Path) -> None:
+    model = scripted(
+        tool_call("task", {"subagent_type": "coder", "description": "say hi"}),
+        AIMessage(content="coder done"),
+        AIMessage(content="all done"),
+    )
+    build_agent(load_settings(), model_override=model).invoke({"messages": [HumanMessage("delegate")]}, _config())
+    coder_system = model.seen_prompts[1][0].content
+    coder_text = coder_system if isinstance(coder_system, str) else " ".join(str(b) for b in coder_system)
+    assert "git-workflow" in coder_text  # skills listed for the coder too
+    assert model.seen_tools.count("propose_skill") >= 2  # orchestrator + coder
 
 
 def test_seed_memory_is_never_overwritten(hq_env: Path) -> None:

@@ -1,12 +1,14 @@
-# HQ stack. Sized for a 2 vCPU / 8 GB VPS (worst case ~7.5 GB with two busy sandboxes).
+# HQ stack. Sized for a 2 vCPU / 8 GB VPS (worst case ~7.6 GB with two busy sandboxes;
+# the idle reaper stops sandboxes nobody is using, so that worst case is rare).
 #
 #   make up                 # core stack
 #   make up PROFILES=obs    # + Phoenix tracing
 #
 # Networks:
-#   internal  - no internet. Postgres, docker-proxy, Phoenix. Only the agent reaches them.
-#   edge      - internet egress. Caddy, agent, SearXNG.
-#   hq-sandbox (created by the agent) - where code runs. Shares nothing with the above.
+#   internal   - no internet. Postgres, docker-proxy, Phoenix. Only the agent reaches them.
+#   edge       - internet egress. Caddy, agent, SearXNG, git-gateway.
+#   hq-sandbox - where code runs (`make network` creates it). Shared only with git-gateway,
+#                which is how sandboxes reach GitHub without holding a credential.
 
 name: hq
 
@@ -50,17 +52,53 @@ services:
       ENV_MODE: PRODUCTION
       HQ_DATA_DIR: /data
       HQ_SKILLS_DIR: /data/skills
+      HQ_BUILTIN_SKILLS_DIR: /app/builtin-skills
+      HQ_MCP_CONFIG: /app/config/mcp.json
       SEARXNG_URL: http://searxng:8080
       # Home machine first (over Tailscale), VPS last. See README "Home node".
       SANDBOX_DOCKER_HOSTS: ${SANDBOX_DOCKER_HOSTS:-tcp://docker-proxy:2375}
+      SANDBOX_NETWORK: hq-sandbox
+      GIT_GATEWAY_URL: ${GIT_GATEWAY_URL:-http://git-gateway:8080}
     volumes:
-      - ./data/memories:/data/memories
-      - ./skills:/data/skills
+      # memories/, skills/ (live), skill-store/ (proposals + versions), audit/, sandbox-pins.json
+      - ./data:/data
+      # Skills shipped in this repo: copied into data/skills on startup (see skills_store.py).
+      - ./skills:/app/builtin-skills:ro
+      - ./config:/app/config:ro
     networks: [internal, edge]
     depends_on:
       postgres: { condition: service_healthy }
       docker-proxy: { condition: service_started }
+      git-gateway: { condition: service_started }
     mem_limit: 1536m
+    logging: *logging
+
+  # Sandboxes reach GitHub only through this. It holds the GitHub token (from
+  # secrets/git-gateway.env, which no other container reads), refuses pushes to
+  # anything but hq/* branches of allowlisted repos, and logs every request.
+  git-gateway:
+    build: ./agent
+    restart: unless-stopped
+    user: "${HQ_UID:-10001}:${HQ_GID:-10001}"
+    command: ["python", "-m", "hq_agent.git_gateway"]
+    env_file: secrets/git-gateway.env
+    environment:
+      GIT_GATEWAY_SECRET: ${GIT_GATEWAY_SECRET:?set GIT_GATEWAY_SECRET in .env (make init)}
+      GIT_GATEWAY_AUDIT: /data/audit/git-gateway.jsonl
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data/audit:/data/audit
+    # Home-machine sandboxes reach the gateway over Tailscale: set GIT_GATEWAY_BIND
+    # to the VPS's Tailscale IP. The default only listens on the VPS itself.
+    ports:
+      - "${GIT_GATEWAY_BIND:-127.0.0.1}:8081:8080"
+    networks: [edge, sandbox]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+    mem_limit: 160m
     logging: *logging
 
   # The agent never gets the raw Docker socket. This proxy only allows what the
@@ -131,6 +169,9 @@ networks:
   internal:
     internal: true
   edge: {}
+  sandbox:
+    name: hq-sandbox
+    external: true  # created by `make network`, so the agent and compose agree on it
 
 volumes:
   pg_data:

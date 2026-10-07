@@ -1,0 +1,20 @@
+{
+  "_doc": "MCP servers HQ connects to at startup. See agent/src/hq_agent/mcp.py for the format. Secrets come from .env via ${VAR}. Restart the agent (make restart) after editing.",
+  "servers": {
+    "github": {
+      "_doc": "GitHub's hosted MCP server. Skipped until GITHUB_MCP_TOKEN is set. Patterns match GitHub's tool names; anything not listed is never given to that agent.",
+      "transport": "streamable_http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": { "Authorization": "Bearer ${GITHUB_MCP_TOKEN}" },
+      "requires_env": ["GITHUB_MCP_TOKEN"],
+      "timeout_seconds": 30,
+      "agents": {
+        "orchestrator": ["get_*", "list_*", "search_*", "*_read"],
+        "coder": ["get_*", "list_*", "search_*", "*_read", "create_pull_request", "add_issue_comment"],
+        "reviewer": ["get_*", "list_*", "search_*", "*_read"],
+        "researcher": ["search_*", "get_file_contents"]
+      },
+      "approve": []
+    }
+  }
+}

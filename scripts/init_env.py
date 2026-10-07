@@ -15,6 +15,7 @@ GENERATED = {
     "HQ_API_TOKEN": lambda: secrets.token_urlsafe(48),
     "POSTGRES_PASSWORD": lambda: secrets.token_urlsafe(32),
     "SEARXNG_SECRET": lambda: secrets.token_hex(32),
+    "GIT_GATEWAY_SECRET": lambda: secrets.token_urlsafe(32),
     "HQ_UID": lambda: str(os.getuid()),
     "HQ_GID": lambda: str(os.getgid()),
 }

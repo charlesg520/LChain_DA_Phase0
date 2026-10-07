@@ -1,4 +1,5 @@
-"""Custom tools. Web search runs on a self-hosted SearXNG instance: no API bill, no tracking."""
+"""Custom tools. Web search runs on a self-hosted SearXNG instance: no API bill, no tracking.
+`propose_skill` is how the agent upgrades its own skills (with C's approval)."""
 
 from __future__ import annotations
 
@@ -7,10 +8,11 @@ import socket
 from urllib.parse import urlparse
 
 import httpx
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 from markdownify import markdownify
 
 from hq_agent.config import load_settings
+from hq_agent.skills_store import SkillError, SkillStore
 
 _USER_AGENT = "Mozilla/5.0 (compatible; hq-agent/0.1)"
 _MAX_PAGE_CHARS = 40_000
@@ -85,3 +87,46 @@ async def fetch_url(url: str) -> str:
 
 
 RESEARCH_TOOLS = [web_search, fetch_url]
+
+
+def make_skill_tools(store: SkillStore, *, require_approval: bool, proposed_by: str) -> list[BaseTool]:
+    """`propose_skill`: the only way the agent changes /skills/ (direct writes are denied)."""
+
+    @tool
+    def propose_skill(
+        category: str,
+        name: str,
+        skill_md: str,
+        reason: str,
+        extra_files: dict[str, str] | None = None,
+    ) -> str:
+        """Propose a new skill, or an improved version of an existing one, for C to review.
+
+        Use this when you learn something reusable: a convention, a recipe that worked,
+        a mistake worth never repeating. Read the current SKILL.md first and send the
+        COMPLETE new version (not a diff). Skills change only after C approves.
+
+        Args:
+            category: Skill category folder, e.g. "coding" or "markets".
+            name: Skill folder name in kebab-case. Must equal `name:` in the frontmatter.
+            skill_md: Full SKILL.md content, starting with frontmatter that has `name` and
+                `description` (what it does and when to use it).
+            reason: What you learned and why this makes the skill better. C reads this.
+            extra_files: Optional supporting text files, path (relative to the skill
+                folder) -> full content, e.g. {"scripts/check.sh": "..."}.
+        """
+        files = {"SKILL.md": skill_md, **(extra_files or {})}
+        try:
+            proposal, diff = store.propose(category, name, files, reason, proposed_by=proposed_by)
+        except SkillError as exc:
+            return f"Not proposed: {exc}"
+        changed = sum(1 for line in diff.splitlines() if line[:1] in "+-" and not line.startswith(("+++", "---")))
+        if not require_approval:
+            approved = store.approve(proposal.id, note="auto-approved (REQUIRE_SKILL_APPROVAL=false)")
+            return f"Skill {proposal.key} updated and live as version {approved.version} ({changed} lines changed)."
+        return (
+            f"Proposal {proposal.id} for {proposal.key} is waiting for C's review ({changed} lines changed). "
+            "It is NOT live yet; keep working from the current version until C approves it."
+        )
+
+    return [propose_skill]
