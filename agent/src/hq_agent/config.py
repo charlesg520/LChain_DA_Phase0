@@ -56,11 +56,11 @@ class ModelRouting:
     home machine is asleep.
     """
 
-    orchestrator: str = field(default_factory=lambda: _env("MODEL_ORCHESTRATOR", "anthropic:claude-sonnet-5"))
-    coder: str = field(default_factory=lambda: _env("MODEL_CODER", "anthropic:claude-sonnet-5"))
+    orchestrator: str = field(default_factory=lambda: _env("MODEL_ORCHESTRATOR", "anthropic:claude-sonnet-5-5"))
+    coder: str = field(default_factory=lambda: _env("MODEL_CODER", "anthropic:claude-sonnet-5-5"))
     reviewer: str = field(default_factory=lambda: _env("MODEL_REVIEWER", "anthropic:claude-opus-5-5"))
     researcher: str = field(default_factory=lambda: _env("MODEL_RESEARCHER", "ollama:qwen3:14b"))
-    fallback: str = field(default_factory=lambda: _env("MODEL_FALLBACK", "anthropic:claude-haiku-4-5-20251001"))
+    fallback: str = field(default_factory=lambda: _env("MODEL_FALLBACK", "anthropic:claude-haiku-5-5"))
     ollama_base_url: str = field(default_factory=lambda: _env("OLLAMA_BASE_URL", ""))
 
 
@@ -122,6 +122,13 @@ class Settings:
         default_factory=lambda: Path(p) if (p := _env("HQ_BUILTIN_SKILLS_DIR", "")) else None
     )
     mcp_config: Path | None = field(default_factory=lambda: Path(p) if (p := _env("HQ_MCP_CONFIG", "")) else None)
+    # Copied to mcp_config on first start when mcp_config doesn't exist yet (the repo's config/mcp.json).
+    mcp_seed: Path | None = field(default_factory=lambda: Path(p) if (p := _env("HQ_MCP_SEED", "")) else None)
+    # stdio MCP servers run programs inside the agent container, which can reach the
+    # database and the Docker proxy. Adding them from the UI is off unless you opt in.
+    allow_stdio_mcp: bool = field(default_factory=lambda: _env_bool("HQ_ALLOW_STDIO_MCP", False))
+    # Tools that pause for C's approval in every agent, e.g. "execute,write_file,edit_file".
+    require_approval: tuple[str, ...] = field(default_factory=lambda: _env_list("HQ_REQUIRE_APPROVAL", ""))
     searxng_url: str = field(default_factory=lambda: _env("SEARXNG_URL", ""))
     enable_todos: bool = field(default_factory=lambda: _env_bool("ENABLE_TODOS", False))
     require_skill_approval: bool = field(default_factory=lambda: _env_bool("REQUIRE_SKILL_APPROVAL", True))

@@ -18,9 +18,9 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from hq_agent import __version__, mcp
+from hq_agent import __version__, browse, mcp
 from hq_agent.backends.docker_sandbox import DockerSandbox, project_slug
-from hq_agent.config import load_settings
+from hq_agent.config import Settings, load_settings
 from hq_agent.git_gateway import read_audit
 from hq_agent.reaper import get_reaper
 from hq_agent.security import AuthError, check_bearer
@@ -51,6 +51,27 @@ def _store() -> SkillStore:
 def _reaper():
     s = load_settings()
     return get_reaper(s.sandbox, s.data_dir)
+
+
+_SANDBOX: tuple[Any, DockerSandbox] | None = None
+
+
+def _sandbox(settings: Settings) -> DockerSandbox | None:
+    """One sandbox client for browsing, reused while the settings stay the same."""
+    global _SANDBOX
+    if not settings.sandbox.enabled:
+        return None
+    if _SANDBOX is None or _SANDBOX[0] != settings.sandbox:
+        _SANDBOX = (settings.sandbox, DockerSandbox(settings.sandbox))
+    return _SANDBOX[1]
+
+
+@contextlib.contextmanager
+def _browse_errors():
+    try:
+        yield
+    except browse.BrowseError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
 
 @contextlib.contextmanager
@@ -92,7 +113,65 @@ async def info() -> dict:
         "mcp": {name: s.status for name, s in toolset.status.items()},
         "git_gateway": settings.sandbox.git_gateway_url or None,
         "web_search": bool(settings.searxng_url),
+        "require_approval": list(settings.require_approval),
+        "allow_stdio_mcp": settings.allow_stdio_mcp,
+        "skill_approval": settings.require_skill_approval,
     }
+
+
+# ------------------------------------------------------------------ browsing
+@router.get("/fs")
+async def fs_list(path: str = "/", project: str = "default") -> dict[str, Any]:
+    settings = load_settings()
+    with _browse_errors():
+        return await run_in_threadpool(browse.list_dir, settings, _sandbox(settings), project_slug(project), path)
+
+
+@router.get("/fs/file")
+async def fs_file(path: str, project: str = "default") -> dict[str, Any]:
+    settings = load_settings()
+    with _browse_errors():
+        return await run_in_threadpool(browse.read_file, settings, _sandbox(settings), project_slug(project), path)
+
+
+class MemoryWrite(BaseModel):
+    path: str
+    content: str
+
+
+@router.get("/memory")
+async def memory_get() -> dict[str, Any]:
+    return {"files": browse.memory_files(load_settings())}
+
+
+@router.put("/memory")
+async def memory_put(body: MemoryWrite) -> dict[str, Any]:
+    settings = load_settings()
+    with _browse_errors():
+        path = browse.save_memory(settings, body.path, body.content)
+    return {"saved": path, "files": browse.memory_files(settings)}
+
+
+# --------------------------------------------------------------------- tools
+_TOOLS_CACHE: dict[str, Any] = {}
+
+
+@router.get("/tools")
+async def tools() -> list[dict[str, Any]]:
+    """Every tool, with schema and which agents get it. Rebuilt when MCP servers or skills change."""
+    settings = load_settings()
+    toolset = mcp.current()
+    key = f"{id(toolset)}:{toolset.loaded_at}:{settings.require_approval}"
+    if _TOOLS_CACHE.get("key") != key:
+        _TOOLS_CACHE["value"] = await run_in_threadpool(_build_registry, settings, toolset)
+        _TOOLS_CACHE["key"] = key
+    return _TOOLS_CACHE["value"]
+
+
+def _build_registry(settings: Settings, toolset: mcp.MCPToolset) -> list[dict[str, Any]]:
+    from hq_agent.graph import tool_registry
+
+    return tool_registry(settings, toolset)
 
 
 # --------------------------------------------------------------------- skills
@@ -123,14 +202,32 @@ async def skill(category: str, name: str) -> dict[str, Any]:
 
 @router.put("/skills/{category}/{name}")
 async def save_skill(category: str, name: str, body: SkillFiles) -> dict[str, Any]:
+    settings = load_settings()
+    new_category = not (settings.skills_dir / category).is_dir()
     with _skill_errors():
-        return {"version": _store().save(category, name, body.files, note=body.note)}
+        version = _store().save(category, name, body.files, note=body.note)
+    if new_category:
+        mcp.invalidate_graph()  # skill categories are fixed when the graph is built
+    return {"version": version}
+
+
+class Enabled(BaseModel):
+    enabled: bool
+
+
+@router.post("/skills/{category}/{name}/enabled")
+async def skill_enabled(category: str, name: str, body: Enabled) -> dict[str, Any]:
+    with _skill_errors():
+        enabled = _store().set_enabled(category, name, body.enabled)
+    mcp.invalidate_graph()
+    return {"category": category, "name": name, "enabled": enabled}
 
 
 @router.delete("/skills/{category}/{name}")
 async def delete_skill(category: str, name: str) -> dict[str, Any]:
     with _skill_errors():
         _store().delete(category, name)
+    mcp.invalidate_graph()
     return {"deleted": f"{category}/{name}", "restore": "POST .../rollback with an earlier version"}
 
 
@@ -239,10 +336,107 @@ async def unpin_sandbox(project: str) -> dict[str, Any]:
     return {"project": project, "pinned_until": None}
 
 
+# ------------------------------------------------------------------ threads
+@router.post("/threads/{thread_id}/reopen-interrupt")
+async def reopen_interrupt(thread_id: str) -> dict[str, Any]:
+    """Let a thread with pending approvals be resumed again.
+
+    Aegra only accepts a resume while the thread's status is "interrupted"; one
+    failed resume flips it to "error" and strands the approval. The console calls
+    this only after checking the thread state still holds pending interrupts.
+    """
+    try:
+        from sqlalchemy import select
+
+        from aegra_api.api.runs import set_thread_status
+        from aegra_api.core.orm import Thread as ThreadORM
+        from aegra_api.core.orm import _get_session_maker
+    except ImportError as exc:  # pragma: no cover - only outside Aegra
+        raise HTTPException(status_code=501, detail="not running inside Aegra") from exc
+    async with _get_session_maker()() as session:
+        thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+        if thread is None:
+            raise HTTPException(status_code=404, detail="no such thread")
+        if thread.status == "busy":
+            raise HTTPException(status_code=409, detail="thread is running")
+        await set_thread_status(session, thread_id, "interrupted")
+    return {"thread_id": thread_id, "status": "interrupted"}
+
+
 # ------------------------------------------------------------------ mcp + git
 @router.get("/mcp")
 async def mcp_status() -> dict[str, Any]:
     return mcp.current().as_dict()
+
+
+_RELOAD: dict[str, Any] = {"task": None}
+
+
+def _schedule_reload(settings: Settings, connecting: str | None = None) -> None:
+    """Reconnect MCP servers in the background; the UI polls /ops/mcp/servers meanwhile."""
+    if connecting:
+        mcp.current().status[connecting] = mcp.ServerStatus(status="connecting")
+    task = _RELOAD.get("task")
+    if task is not None and not task.done():
+        task.cancel()
+    _RELOAD["task"] = asyncio.create_task(mcp.reload(settings.mcp_config))
+
+
+def _mcp_path(settings: Settings):
+    if settings.mcp_config is None:
+        raise HTTPException(status_code=409, detail="HQ_MCP_CONFIG is not set, so MCP servers can't be edited")
+    return settings.mcp_config
+
+
+@router.get("/mcp/servers")
+async def mcp_servers() -> list[dict[str, Any]]:
+    settings = load_settings()
+    return mcp.describe(settings.mcp_config, mcp.current())
+
+
+@router.post("/mcp/servers")
+async def mcp_add(body: dict[str, Any]) -> list[dict[str, Any]]:
+    settings = load_settings()
+    path = _mcp_path(settings)
+    try:
+        name, cfg = mcp.server_from_form(body, allow_stdio=settings.allow_stdio_mcp)
+        await run_in_threadpool(mcp.upsert_server, path, name, cfg)
+    except mcp.MCPConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _schedule_reload(settings, connecting=name)
+    return mcp.describe(path, mcp.current())
+
+
+@router.delete("/mcp/servers/{name}")
+async def mcp_remove(name: str) -> list[dict[str, Any]]:
+    settings = load_settings()
+    path = _mcp_path(settings)
+    if not await run_in_threadpool(mcp.remove_server, path, name):
+        raise HTTPException(status_code=404, detail=f"no MCP server named {name}")
+    mcp.current().status.pop(name, None)
+    _schedule_reload(settings)
+    return mcp.describe(path, mcp.current())
+
+
+@router.post("/mcp/servers/{name}/enabled")
+async def mcp_enable(name: str, body: Enabled) -> list[dict[str, Any]]:
+    settings = load_settings()
+    path = _mcp_path(settings)
+    if not await run_in_threadpool(mcp.set_server_enabled, path, name, body.enabled):
+        raise HTTPException(status_code=404, detail=f"no MCP server named {name}")
+    if body.enabled:
+        _schedule_reload(settings, connecting=name)
+    else:
+        mcp.current().status[name] = mcp.ServerStatus(status="disabled")
+        _schedule_reload(settings)
+    return mcp.describe(path, mcp.current())
+
+
+@router.post("/mcp/reload")
+async def mcp_reload() -> list[dict[str, Any]]:
+    settings = load_settings()
+    toolset = await mcp.reload(settings.mcp_config)
+    return mcp.describe(settings.mcp_config, toolset)
 
 
 @router.get("/git")
@@ -271,6 +465,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Aegra merges this with its own lifespan. Aegra builds the graph lazily (on the
     first run), so anything the UI should see before then starts here."""
     settings = load_settings()
+    mcp.seed_config(settings.mcp_config, settings.mcp_seed)
     try:
         synced = _store().sync_builtin()
         if any(synced.values()):

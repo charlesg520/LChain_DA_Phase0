@@ -3,7 +3,7 @@ COMPOSE := docker compose
 PROFILES ?=
 PROFILE_FLAGS := $(foreach p,$(PROFILES),--profile $(p))
 
-.PHONY: help init network sandbox-image up down restart logs logs-gateway ps test test-docker test-all smoke skills-pending backup
+.PHONY: help init network sandbox-image up down restart restart-web logs logs-web logs-gateway ps test test-docker test-all test-web smoke skills-pending backup web-dev
 
 help: ## Show targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -12,7 +12,7 @@ init: ## Create .env + secrets/git-gateway.env with generated secrets, prepare d
 	@test -f .env || cp .env.example .env
 	@python3 scripts/init_env.py .env
 	@test -f secrets/git-gateway.env || (cp secrets/git-gateway.env.example secrets/git-gateway.env && chmod 600 secrets/git-gateway.env)
-	@mkdir -p data/memories data/skills data/skill-store data/audit backups
+	@mkdir -p data/memories data/skills data/skill-store data/audit data/web backups
 	@echo "Next: add your model key to .env, a GitHub token to secrets/git-gateway.env, then: make sandbox-image && make up"
 
 network: ## Create the sandbox network (make up does this)
@@ -22,7 +22,7 @@ sandbox-image: ## Build the sandbox image on this Docker host
 	docker build -t hq-sandbox:latest sandbox/
 
 up: network ## Start the stack (PROFILES=obs adds Phoenix tracing)
-	@mkdir -p data/memories data/skills data/skill-store data/audit
+	@mkdir -p data/memories data/skills data/skill-store data/audit data/web
 	$(COMPOSE) $(PROFILE_FLAGS) up -d --build
 
 down: ## Stop the stack (data is kept)
@@ -30,6 +30,12 @@ down: ## Stop the stack (data is kept)
 
 restart: ## Rebuild and restart the agent only
 	$(COMPOSE) up -d --build agent
+
+restart-web: ## Rebuild and restart the web console only
+	$(COMPOSE) up -d --build web
+
+logs-web: ## Follow web console logs
+	$(COMPOSE) logs -f --tail=200 web
 
 logs: ## Follow agent logs
 	$(COMPOSE) logs -f --tail=200 agent
@@ -45,6 +51,12 @@ test: ## Unit tests (no Docker needed)
 
 test-docker: ## Sandbox integration tests (needs Docker + sandbox image)
 	cd agent && uv run --group dev pytest -m docker
+
+test-web: ## Web console: typecheck + server tests (needs Node 20+ and pnpm)
+	cd web && pnpm install --frozen-lockfile && pnpm -r typecheck && pnpm --filter server test
+
+web-dev: ## Run the web console locally in mock mode (no agent needed) on :5173
+	cd web && pnpm install --frozen-lockfile && pnpm start
 
 test-all: ## Everything
 	cd agent && uv run --group dev pytest

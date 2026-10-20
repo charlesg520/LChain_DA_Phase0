@@ -13,22 +13,43 @@
 		-Server
 	}
 
-	# Agent Protocol + ops API. Bearer-token auth is enforced by the agent itself.
-	handle_path /api/* {
+	# Web console routes. Caddy tries `handle` blocks with the most specific
+	# path first, so these win over the /api/* catch-all below.
+	handle /ws {
+		reverse_proxy web:3000
+	}
+	handle /api/history* {
+		reverse_proxy web:3000
+	}
+	handle /api/skills* {
+		reverse_proxy web:3000
+	}
+	handle /api/skill-proposals* {
+		reverse_proxy web:3000
+	}
+	handle /api/sandboxes* {
+		reverse_proxy web:3000
+	}
+
+	# Agent Protocol + ops API, for scripts and curl. Bearer-token auth is
+	# enforced by the agent itself.
+	handle /api/* {
+		uri strip_prefix /api
+
 		# Don't publish the API schema (Aegra serves it without auth).
 		@apidocs path /docs* /redoc* /openapi.json
 		respond @apidocs 404
 
 		reverse_proxy agent:8000 {
-			flush_interval -1          # stream SSE tokens immediately
+			flush_interval -1 # stream SSE tokens immediately
 			transport http {
-				read_timeout 0         # long-running agent runs
+				read_timeout 0 # long-running agent runs
 			}
 		}
 	}
 
-	# Phase 2 replaces this with the web UI (reverse_proxy web:3000).
+	# Everything else is the web UI (static files, served by the console).
 	handle {
-		respond "HQ is running. The web UI arrives in Phase 2." 200
+		reverse_proxy web:3000
 	}
 }

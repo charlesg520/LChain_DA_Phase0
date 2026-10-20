@@ -6,6 +6,7 @@ Layout (all under HQ_DATA_DIR, so none of it is tracked by git):
     skill-store/proposals/<id>/              proposal.json + files/ (the full proposed folder)
     skill-store/versions/<category>/<name>/  v1/, v2/ ... snapshots + history.jsonl
     skill-store/seed.json                    hashes of what was copied from the repo
+    skill-store/disabled/<category>/<name>/  skills switched off in the UI (agents don't see them)
 
 How a skill changes:
 
@@ -191,6 +192,21 @@ class SkillStore:
         self._check(category, name)
         return self.store_dir / "versions" / category / name
 
+    def _disabled(self, category: str, name: str) -> Path:
+        self._check(category, name)
+        return self.store_dir / "disabled" / category / name
+
+    def _location(self, category: str, name: str) -> Path:
+        """Where the skill's files are now: live, or parked as disabled."""
+        live = self._live(category, name)
+        if live.exists():
+            return live
+        parked = self._disabled(category, name)
+        return parked if parked.exists() else live
+
+    def is_enabled(self, category: str, name: str) -> bool:
+        return not self._disabled(category, name).exists() or self._live(category, name).exists()
+
     def _seed_path(self) -> Path:
         return self.store_dir / "seed.json"
 
@@ -198,8 +214,12 @@ class SkillStore:
     def list_skills(self) -> list[dict[str, Any]]:
         seed = self._load_seed()
         skills = []
-        for skill_md in sorted(self.skills_dir.glob("*/*/SKILL.md")):
+        found = [(p, True) for p in self.skills_dir.glob("*/*/SKILL.md")]
+        found += [(p, False) for p in (self.store_dir / "disabled").glob("*/*/SKILL.md")]
+        for skill_md, enabled in sorted(found, key=lambda x: (x[0].parent.parent.name, x[0].parent.name)):
             category, name = skill_md.parent.parent.name, skill_md.parent.name
+            if category.startswith(".") or name.startswith("."):
+                continue
             meta = frontmatter(skill_md.read_text(encoding="utf-8"))
             history = self.history_versions(category, name)
             entry = seed.get(f"{category}/{name}", {})
@@ -213,15 +233,23 @@ class SkillStore:
                     "updated_at": history[-1]["ts"] if history else None,
                     "builtin": bool(entry),
                     "builtin_update_available": bool(entry.get("update_available")),
+                    "enabled": enabled,
                 }
             )
         return skills
 
     def get(self, category: str, name: str) -> dict[str, Any]:
-        files = read_folder(self._live(category, name))
+        files = read_folder(self._location(category, name))
         if not files:
             raise SkillError(f"no skill {category}/{name}")
-        return {"category": category, "name": name, "files": files, "hash": folder_hash(files), "history": self.history(category, name)}
+        return {
+            "category": category,
+            "name": name,
+            "files": files,
+            "hash": folder_hash(files),
+            "history": self.history(category, name),
+            "enabled": self.is_enabled(category, name),
+        }
 
     def history(self, category: str, name: str) -> list[dict[str, Any]]:
         path = self._versions(category, name) / "history.jsonl"
@@ -247,7 +275,7 @@ class SkillStore:
 
     def _ensure_baseline(self, category: str, name: str) -> None:
         """Snapshot the live copy before the first change, so it can always be rolled back to."""
-        live = read_folder(self._live(category, name))
+        live = read_folder(self._location(category, name))
         history = self.history_versions(category, name)
         if live and (not history or history[-1]["hash"] != folder_hash(live)):
             self._record_version(category, name, live, source="baseline", note="live copy before this change")
@@ -255,7 +283,7 @@ class SkillStore:
     def _publish(self, category: str, name: str, files: dict[str, str], source: str, note: str = "") -> int:
         with self._lock:
             self._ensure_baseline(category, name)
-            write_folder_atomic(self._live(category, name), files)
+            write_folder_atomic(self._location(category, name), files)
             return self._record_version(category, name, files, source=source, note=note)
 
     # --------------------------------------------------------------- proposals
@@ -265,7 +293,7 @@ class SkillStore:
         files = validate_skill(category, name, files)
         if not reason.strip():
             raise SkillError("say why: what did you learn that makes this skill better?")
-        live = read_folder(self._live(category, name))
+        live = read_folder(self._location(category, name))
         if live == files:
             raise SkillError(f"no change: {category}/{name} already has exactly this content")
         with self._lock:
@@ -307,7 +335,7 @@ class SkillStore:
     def proposal_detail(self, proposal_id: str) -> dict[str, Any]:
         proposal = self.get_proposal(proposal_id)
         files = self.proposal_files(proposal_id)
-        live = read_folder(self._live(proposal.category, proposal.name))
+        live = read_folder(self._location(proposal.category, proposal.name))
         stale = proposal.status == "pending" and (folder_hash(live) if live else None) != proposal.base_hash
         return {**proposal.__dict__, "files": files, "diff": unified_diff(live, files), "live_changed_since_proposed": stale}
 
@@ -356,7 +384,7 @@ class SkillStore:
     def delete(self, category: str, name: str) -> None:
         """Remove a live skill. Its history stays, so it can be restored with rollback."""
         with self._lock:
-            live = self._live(category, name)
+            live = self._location(category, name)
             if not live.exists():
                 raise SkillError(f"no skill {category}/{name}")
             self._ensure_baseline(category, name)
@@ -395,7 +423,7 @@ class SkillStore:
                 builtin = read_folder(skill_md.parent)
                 b_hash = folder_hash(builtin)
                 entry = seed.get(key)
-                live = read_folder(self._live(category, name))
+                live = read_folder(self._location(category, name))
                 if entry is None:
                     if not live:
                         self._publish(category, name, builtin, source="builtin")
@@ -414,6 +442,25 @@ class SkillStore:
                     report["flagged"].append(key)
             self._save_seed(seed)
         return report
+
+    def set_enabled(self, category: str, name: str, enabled: bool) -> bool:
+        """Switch a skill on or off for every agent. Its files and history are kept either way."""
+        with self._lock:
+            live, parked = self._live(category, name), self._disabled(category, name)
+            src, dst = (parked, live) if enabled else (live, parked)
+            if not src.exists():
+                if dst.exists():
+                    return enabled  # already in the requested state
+                raise SkillError(f"no skill {category}/{name}")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists():
+                shutil.rmtree(dst)
+            src.rename(dst)
+            vdir = self._versions(category, name)
+            vdir.mkdir(parents=True, exist_ok=True)
+            with (vdir / "history.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"version": None, "ts": time.time(), "source": "enabled" if enabled else "disabled", "note": "", "hash": None}) + "\n")
+            return enabled
 
     def adopt_builtin(self, category: str, name: str) -> int:
         """Replace the live skill with the repo's version (C's call when both changed)."""

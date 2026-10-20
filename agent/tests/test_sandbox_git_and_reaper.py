@@ -205,3 +205,29 @@ def test_parse_docker_time() -> None:
 
     expected = datetime(2026, 10, 7, 22, 31, 21, 123456, tzinfo=timezone.utc).timestamp()
     assert parse_docker_time("2026-10-07T22:31:21.123456789Z") == pytest.approx(expected)
+
+
+def test_ui_browsing_lists_and_reads_sandbox_files(project) -> None:
+    from hq_agent import browse
+    from hq_agent.config import load_settings
+
+    sandbox = ds.DockerSandbox(_settings())
+    sandbox.upload_files([("/workspace/app/main.py", b"print('hi')\n"), ("/workspace/app/logo.png", b"\x89PNG\r\n\x1a\nxx\x00yy")])
+    sandbox.execute("mkdir -p /workspace/app/src && ln -s main.py /workspace/app/link.py")
+    settings = load_settings()
+    listing = browse.list_dir(settings, sandbox, project, "/workspace/app")
+    names = [(e["name"], e["type"]) for e in listing["entries"]]
+    assert names[0] == ("src", "dir")
+    assert ("main.py", "file") in names and ("logo.png", "file") in names
+    main = next(e for e in listing["entries"] if e["name"] == "main.py")
+    assert main["size"] == 12 and main["modified_at"] > 1_700_000_000_000 and main["mime"] == "text/x-python"
+    text = browse.read_file(settings, sandbox, project, "/workspace/app/main.py")
+    assert text["encoding"] == "utf8" and text["content"] == "print('hi')\n"
+    png = browse.read_file(settings, sandbox, project, "/workspace/app/logo.png")
+    assert png["encoding"] == "base64" and png["mime"] == "image/png"
+    with pytest.raises(browse.BrowseError) as e:
+        browse.read_file(settings, sandbox, project, "/workspace/app/src")
+    assert e.value.status == 400
+    with pytest.raises(browse.BrowseError) as e:
+        browse.list_dir(settings, sandbox, project, "/workspace/missing")
+    assert e.value.status == 404

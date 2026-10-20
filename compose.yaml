@@ -1,4 +1,4 @@
-# HQ stack. Sized for a 2 vCPU / 8 GB VPS (worst case ~7.6 GB with two busy sandboxes;
+# HQ stack. Sized for a 2 vCPU / 8 GB VPS (worst case ~7.8 GB with two busy sandboxes;
 # the idle reaper stops sandboxes nobody is using, so that worst case is rare).
 #
 #   make up                 # core stack
@@ -53,7 +53,9 @@ services:
       HQ_DATA_DIR: /data
       HQ_SKILLS_DIR: /data/skills
       HQ_BUILTIN_SKILLS_DIR: /app/builtin-skills
-      HQ_MCP_CONFIG: /app/config/mcp.json
+      # Live MCP config (the web UI edits it); seeded once from config/mcp.json.
+      HQ_MCP_CONFIG: /data/mcp.json
+      HQ_MCP_SEED: /app/config/mcp.json
       SEARXNG_URL: http://searxng:8080
       # Home machine first (over Tailscale), VPS last. See README "Home node".
       SANDBOX_DOCKER_HOSTS: ${SANDBOX_DOCKER_HOSTS:-tcp://docker-proxy:2375}
@@ -71,6 +73,27 @@ services:
       docker-proxy: { condition: service_started }
       git-gateway: { condition: service_started }
     mem_limit: 1536m
+    logging: *logging
+
+  # The console: serves the web UI and bridges the browser to the agent over one
+  # WebSocket. It holds the API token, so browsers never see it. Chat transcripts
+  # (including sub-agent messages) are kept in data/web.
+  web:
+    build: ./web
+    restart: unless-stopped
+    user: "${HQ_UID:-10001}:${HQ_GID:-10001}"
+    environment:
+      HQ_WEB_MODE: live
+      HQ_API_URL: http://agent:8000
+      HQ_API_TOKEN: ${HQ_API_TOKEN:?set HQ_API_TOKEN in .env (make init)}
+      # Optional separate login token for the browser; defaults to HQ_API_TOKEN.
+      WEB_TOKEN: ${WEB_TOKEN:-}
+      WEB_DATA_DIR: /data/web
+    volumes:
+      - ./data/web:/data/web
+    networks: [edge]
+    depends_on: [agent]
+    mem_limit: 192m
     logging: *logging
 
   # Sandboxes reach GitHub only through this. It holds the GitHub token (from
@@ -146,7 +169,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks: [edge]
-    depends_on: [agent]
+    depends_on: [agent, web]
     mem_limit: 128m
     logging: *logging
 

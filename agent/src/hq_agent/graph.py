@@ -3,9 +3,11 @@ Postgres checkpointer and store itself, so none are configured here."""
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from pathlib import Path
+from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
 from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
@@ -92,14 +94,84 @@ def build_agent(
         skills=skill_sources(settings) or None,
         memory=[MEMORY_FILE],
         permissions=permissions,
-        interrupt_on=toolset.interrupt_on("orchestrator") or None,
+        interrupt_on=approvals(settings, toolset, "orchestrator") or None,
         backend=backend,
         name="hq",
     )
 
 
+def approvals(settings: Settings, toolset: mcp.MCPToolset, role: str) -> dict[str, bool]:
+    """Tools that pause for C's approval for one agent: HQ_REQUIRE_APPROVAL plus MCP `approve` lists."""
+    return {**{name: True for name in settings.require_approval}, **toolset.interrupt_on(role)}
+
+
+_FS_TOOLS = {"ls", "read_file", "write_file", "edit_file", "glob", "grep", "execute", "delete"}
+_READ_ONLY = {"ls", "read_file", "glob", "grep", "execute"}
+_SUBAGENTS = ("coder", "reviewer", "researcher", "general-purpose")
+
+
+def tool_registry(settings: Settings, toolset: mcp.MCPToolset) -> list[dict[str, Any]]:
+    """Every tool any agent can call, with its JSON schema and which agents get it (for the UI)."""
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    graph = build_agent(settings, mcp_tools=toolset)
+    by_name: dict[str, Any] = dict(getattr(graph.nodes["tools"].bound, "tools_by_name", {}))
+    for role in _SUBAGENTS:
+        for tool in toolset.tools_for(role if role != "general-purpose" else "orchestrator"):
+            by_name.setdefault(tool.name, tool)
+    mcp_roles: dict[str, set[str]] = {}
+    for role in ("orchestrator", "coder", "reviewer", "researcher"):
+        for tool in toolset.tools_for(role):
+            mcp_roles.setdefault(tool.name, set()).add(role)
+            if role == "orchestrator":
+                mcp_roles[tool.name].add("general-purpose")  # inherits the orchestrator's tools
+
+    def agents_for(name: str) -> list[str]:
+        if name in mcp_roles:
+            roles = mcp_roles[name]
+        elif name in _FS_TOOLS:
+            roles = {"orchestrator", "coder", "researcher", "general-purpose"} | ({"reviewer"} if name in _READ_ONLY else set())
+        elif name in ("web_search", "fetch_url"):
+            roles = {"orchestrator", "coder", "researcher", "general-purpose"}
+        elif name == "propose_skill":
+            roles = {"orchestrator", "coder", "general-purpose"}
+        else:
+            roles = {"orchestrator"}
+        order = ["orchestrator", *_SUBAGENTS]
+        return [r for r in order if r in roles]
+
+    def source_for(name: str) -> str:
+        if name in mcp_roles or any(name in s.tools for s in toolset.status.values()):
+            server = next((n for n, st in toolset.status.items() if name in st.tools), "mcp")
+            return f"mcp:{server}"
+        if name in _FS_TOOLS or name in ("task", "write_todos"):
+            return "harness"
+        return "hq"
+
+    approval_any = set(settings.require_approval) | {n for r in ("orchestrator", "coder", "reviewer", "researcher") for n in toolset.interrupt_on(r)}
+    out = []
+    for name, tool in sorted(by_name.items(), key=lambda kv: (source_for(kv[0]) != "harness", source_for(kv[0]), kv[0])):
+        try:
+            params = convert_to_openai_tool(tool)["function"].get("parameters", {})
+        except Exception:  # noqa: BLE001 - a schema we can't render shouldn't hide the tool
+            params = {}
+        description = (tool.description or "").strip()
+        out.append(
+            {
+                "name": name,
+                "description": description.split("\n\n")[0][:600],
+                "schema": json.dumps(params, indent=2),
+                "agents": agents_for(name),
+                "source": source_for(name),
+                "approval": name in approval_any,
+            }
+        )
+    return out
+
+
 async def make_graph() -> CompiledStateGraph:
     """Async factory Aegra awaits once at startup. MCP servers are connected here."""
     settings = load_settings()
+    mcp.seed_config(settings.mcp_config, settings.mcp_seed)
     toolset = await mcp.ensure_loaded(settings.mcp_config)
     return build_agent(settings, mcp_tools=toolset)

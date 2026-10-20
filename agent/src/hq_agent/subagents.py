@@ -32,6 +32,7 @@ def build_subagents(
 
     routing = settings.models
     toolset = mcp_tools or MCPToolset()
+    approve = {name: True for name in settings.require_approval}
     skills = skill_sources(settings) or None
 
     def role(spec: str):
@@ -62,7 +63,7 @@ def build_subagents(
             "middleware": [*coder_mw, *coder_extra],
             "tools": coder_tools,
             "skills": skills,
-            "interrupt_on": toolset.interrupt_on("coder"),
+            "interrupt_on": {**approve, **toolset.interrupt_on("coder")},
         },
         {
             "name": "reviewer",
@@ -77,7 +78,7 @@ def build_subagents(
             # Replaces the default filesystem middleware, so write/edit/delete tools don't exist for it.
             "middleware": [FilesystemMiddleware(backend=backend, tools=READ_ONLY_FS_TOOLS), *reviewer_mw],
             "skills": skills,
-            "interrupt_on": toolset.interrupt_on("reviewer"),
+            "interrupt_on": {**approve, **toolset.interrupt_on("reviewer")},
         },
         {
             "name": "researcher",
@@ -89,6 +90,6 @@ def build_subagents(
             "model": researcher_model,
             "middleware": researcher_mw,
             "tools": [*RESEARCH_TOOLS, *toolset.tools_for("researcher")],
-            "interrupt_on": toolset.interrupt_on("researcher"),
+            "interrupt_on": {**approve, **toolset.interrupt_on("researcher")},
         },
     ]

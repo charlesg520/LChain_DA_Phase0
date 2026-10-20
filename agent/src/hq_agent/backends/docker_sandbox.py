@@ -395,6 +395,58 @@ class DockerSandbox(BaseSandbox):
             tar.addfile(info, io.BytesIO(content))
         return buf.getvalue()
 
+    # ------------------------------------------------------- browsing (UI)
+    def list_dir(self, project: str, path: str, limit: int = 1000) -> list[dict[str, Any]]:
+        """Entries of a directory inside a project's sandbox (no shell involved)."""
+        container, host = self._container(project_slug(project))
+        with ACTIVITY.busy(host, container.name):
+            res = container.exec_run(
+                ["find", path, "-mindepth", "1", "-maxdepth", "1", "-printf", "%y\t%s\t%T@\t%f\n"],
+                user=f"{SANDBOX_UID}:{SANDBOX_UID}",
+                demux=True,
+            )
+        out, err = res.output if isinstance(res.output, tuple) else (res.output, b"")
+        if res.exit_code != 0 and not out:
+            msg = (err or b"").decode(errors="replace").strip()
+            raise FileNotFoundError(msg or f"cannot list {path}")
+        entries = []
+        for line in (out or b"").decode(errors="replace").splitlines():
+            parts = line.split("\t", 3)
+            if len(parts) != 4:
+                continue
+            kind, size, mtime, name = parts
+            entries.append(
+                {
+                    "name": name,
+                    "type": "dir" if kind == "d" else "file",
+                    "size": int(size) if kind != "d" and size.isdigit() else 0,
+                    "modified_at": int(float(mtime) * 1000) if mtime else 0,
+                    "symlink": kind == "l",
+                }
+            )
+        entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+        return entries[:limit]
+
+    def read_bytes(self, project: str, path: str, max_bytes: int) -> bytes:
+        """Raw bytes of one file inside a project's sandbox."""
+        container, host = self._container(project_slug(project))
+        with ACTIVITY.busy(host, container.name):
+            try:
+                stream, stat = container.get_archive(path)
+            except NotFound as exc:
+                raise FileNotFoundError(f"no such file: {path}") from exc
+            if stat.get("mode", 0) & (1 << 31):
+                raise IsADirectoryError(path)
+            if int(stat.get("size", 0)) > max_bytes:
+                raise ValueError(f"{path} is {stat.get('size')} bytes; the viewer limit is {max_bytes}")
+            data = b"".join(stream)
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            member = next((m for m in tar.getmembers() if m.isfile()), None)
+            extracted = tar.extractfile(member) if member else None
+            if extracted is None:
+                raise FileNotFoundError(f"no such file: {path}")
+            return extracted.read()
+
     # ------------------------------------------------------------- ops / UI
     def status(self) -> dict[str, Any]:
         """Snapshot for the ops API and dashboard."""

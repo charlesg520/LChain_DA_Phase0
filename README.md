@@ -13,6 +13,7 @@ A coding-first [LangChain DeepAgent](https://github.com/langchain-ai/deepagents)
 | Tools | MCP servers from `config/mcp.json`, allowlisted per agent |
 | Web search | Self-hosted SearXNG (no API bill) |
 | Tracing | Arize Phoenix (optional profile) |
+| Web console | `web/`: React UI + a small Node bridge (ws + express). Chat, history, approvals, sub-agents, files, memory, skills, tools, MCP servers |
 | Edge | Caddy with automatic HTTPS |
 
 ## Layout
@@ -37,6 +38,9 @@ sandbox/Dockerfile     the image agent code runs in
 skills/                built-in playbooks (copied into data/skills/ on startup)
 config/mcp.json        MCP servers and which agent gets which tools
 secrets/               git-gateway.env (GitHub token; only the gateway reads it)
+web/                   the console (pnpm workspace)
+  ui/                  React 18 + Vite + Tailwind
+  server/              mock server and live bridge to the agent
 infra/                 Caddy, SearXNG, home-node compose
 compose.yaml           the whole stack
 ```
@@ -61,8 +65,9 @@ make init                  # creates .env + secrets/git-gateway.env, generates a
 nano .env                  # model key, HQ_DOMAIN (DNS A record -> VPS IP), optional GITHUB_MCP_TOKEN
 nano secrets/git-gateway.env   # GitHub token + which repos HQ may push to
 make sandbox-image         # build the sandbox image on this host
-make up                    # postgres, agent, git-gateway, docker-proxy, searxng, caddy
+make up                    # postgres, agent, web, git-gateway, docker-proxy, searxng, caddy
 make smoke                 # calls /api/ops/info through Caddy with your token
+# then open https://<HQ_DOMAIN>/ and paste HQ_API_TOKEN in Settings
 ```
 
 Add tracing with `make up PROFILES=obs` and set `OTEL_TARGETS=PHOENIX` in `.env`. Phoenix listens on `127.0.0.1:6006` only; reach it through an SSH tunnel or Tailscale.
@@ -109,17 +114,36 @@ sandbox ── plain `git clone/push https://github.com/...` ──► git-gatew
 - **Token:** use a fine-grained token with *Only select repositories*, Contents read/write. For belt and braces, add a ruleset on `main` in each repo (require PRs, no bypass). Then even a leaked token can't touch `main`.
 - **Home-machine sandboxes** reach the gateway over Tailscale. Set `GIT_GATEWAY_BIND=<VPS Tailscale IP>` and `GIT_GATEWAY_URL_OVERRIDES=tcp://<home IP>:2375=http://<VPS Tailscale IP>:8081`.
 
+## Web console
+
+Open `https://<HQ_DOMAIN>/` and paste your token in Settings (`HQ_API_TOKEN`, or `WEB_TOKEN` if you set one). The browser talks to the `web` container over one WebSocket; the `web` container talks to the agent with `HQ_API_TOKEN`, which never reaches the browser.
+
+| View | What it does |
+|---|---|
+| Chat | Streaming replies with reasoning, tool cards (args, result, duration), the live plan, approvals inline. `Ctrl/Cmd+K` focuses the box, `Esc` stops. Pick the sandbox project per chat. |
+| History | Every chat (one HQ thread each), searchable; open one to read it or keep going. Sub-agent conversations are kept too. |
+| Tasks / Sub-agents | The plan checklist, and each delegated task with its own live conversation and report. |
+| Files | Browse `/workspace` (the project's sandbox), `/memories` and `/skills`; code, Markdown, images, video, audio and PDF previews. |
+| Memory | Edit `AGENTS.md` and other memory files. |
+| Toolkit | Skills (enable/disable, edit, version history and rollback, review the agent's proposals), every tool each agent has and which need approval, MCP servers (add, disable, remove, live status; no restart). |
+| Console | Every frame from the server, filterable, for debugging. |
+| Settings | Connection, accent colour, sandboxes (pin, stop). |
+
+Runs keep going in HQ if the browser or the console restarts: reopening the page drops you back into a chat HQ is still working in, pending approvals included. **Pause** stops at the next step and **Resume** continues from the checkpoint (a step that was cut off runs again). Tools listed in `HQ_REQUIRE_APPROVAL`, and any MCP tool in a server's `approve` list, wait for you: approve, approve with edited arguments, or reject with a note the agent reads.
+
+Develop the UI without the agent: `make web-dev` runs it against a scripted mock server on http://localhost:5173.
+
 ## Skills: how the agent upgrades itself
 
 1. The agent learns something reusable and calls `propose_skill` with the full new `SKILL.md` and its reason. Bad proposals (no frontmatter, name mismatch, hidden or binary files, too big) come straight back with a fixable error.
-2. You review in the ops API (the UI in Phase 2): `GET /ops/skill-proposals`, `GET /ops/skill-proposals/{id}` shows the diff, then `POST .../approve` (optionally with your edits) or `.../reject`.
+2. You review in the console (Toolkit > Skills > proposals) or the ops API: `GET /ops/skill-proposals`, `GET /ops/skill-proposals/{id}` shows the diff, then `POST .../approve` (optionally with your edits) or `.../reject`.
 3. Every change is a version: `GET /ops/skills/{category}/{name}` shows history, and `POST .../rollback {"version": N}` restores one. A rollback is itself a new version, so history is never rewritten.
 
 Skills shipped in `skills/` are copied into `data/skills/` on startup. If you edit one in the repo later, the change flows in automatically, unless an approved proposal changed it, in which case it's flagged (`builtin_update_available`) rather than overwritten; `POST .../adopt-builtin` takes the repo version. Set `REQUIRE_SKILL_APPROVAL=false` to auto-approve (still versioned).
 
 ## MCP tools
 
-Servers are listed in `config/mcp.json`, with secrets as `${VAR}` from `.env`. Each server says which agent gets which tools (glob patterns on the server's tool names). Anything not listed is never offered, and `approve` lists tools that pause for your OK. GitHub's hosted MCP server ships configured and switches on when you set `GITHUB_MCP_TOKEN`. A server that's down is reported in `GET /ops/mcp` and skipped; the agent still starts, and a failure mid-run comes back to the model as an error. Restart the agent after editing (`make restart`).
+Add, disable and remove servers in the console (Toolkit > Servers); changes apply without a restart. The live list is `data/mcp.json`, seeded from `config/mcp.json` on first start, with secrets as `${VAR}` from `.env` (secrets typed in the console are masked when shown). Servers that run a local command (`stdio`) execute inside the agent container, so the console only accepts them with `HQ_ALLOW_STDIO_MCP=true`. Each server says which agent gets which tools (glob patterns on the server's tool names). Anything not listed is never offered, and `approve` lists tools that pause for your OK. GitHub's hosted MCP server ships configured and switches on when you set `GITHUB_MCP_TOKEN`. A server that's down is reported in `GET /ops/mcp` and skipped; the agent still starts, and a failure mid-run comes back to the model as an error.
 
 ## Sandbox lifecycle
 
@@ -136,6 +160,7 @@ The idle reaper runs inside the agent server and sweeps every Docker host, inclu
 
 ## Security model
 
+- **Console:** browsers sign in with a token (`WEB_TOKEN`, default `HQ_API_TOKEN`); the agent token stays inside the `web` container. Every WebSocket and REST call is checked.
 - **API:** every Agent Protocol and `/ops` route needs `Authorization: Bearer <HQ_API_TOKEN>`. If the token is missing or shorter than 32 characters, every protected route answers 503 (fails closed, never open). API docs are not exposed through Caddy.
 - **Sandboxes:** read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, uid 1000, memory/CPU/PID caps, and their own network with no route to Postgres, the Docker proxy or the agent. The backend only reuses containers it labelled itself.
 - **Docker access:** the agent never gets the raw Docker socket. It talks to a socket proxy that only exposes the endpoints the sandbox backend needs, on a network with no internet access.
@@ -151,7 +176,10 @@ The idle reaper runs inside the agent server and sweeps every Docker host, inclu
 make test          # unit tests, no Docker needed (incl. a real git client through the gateway, a real MCP server)
 make test-docker   # sandbox integration tests (needs Docker + sandbox image)
 make test-all      # everything
+make test-web      # console: typecheck + server tests
 ```
+
+The console's end-to-end suite (`web/server/test/live.test.js`) drives a real agent through a scripted fake model (`web/server/test/fake_llm.py`): streaming, a sub-agent, an approval, pause/resume, stop, a console restart mid-run, files in a real sandbox, MCP and skill changes. Run it with `HQ_LIVE_URL` and `HQ_LIVE_TOKEN` pointing at an agent started with that fake model.
 
 ## Upstream issues found while building (and how they're handled)
 
@@ -168,7 +196,7 @@ make test-all      # everything
 |---|---|---|
 | 0 | Stack, agent core, Docker sandbox, auth, tests | done |
 | 1 | Git gateway, MCP tools, skill-upgrade flow, idle sandbox reaper, repo tidy | done |
-| 2 | Web UI v1: chat, streaming, subagent tree, approvals inbox (skill proposals, MCP approvals), file workbench, sandbox panel | next |
+| 2 | Web console: chat, history, streaming, sub-agents, approvals, files, memory, skill studio, tools, MCP servers, sandboxes | done |
 | 3 | Markets team (analyst, quant, risk), data connectors, Pine Script v6 output, TradingView-parity backtests, paper trading, readiness pipeline | |
 | 4 | Scheduler, cost/token tracking, backups, VPS hardening | |
 | 5 | UI v2: markets cockpit, skill studio, dashboards | |

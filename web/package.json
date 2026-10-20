@@ -1,0 +1,21 @@
+{
+  "name": "hq-web",
+  "private": true,
+  "description": "HQ console: web UI for the HQ DeepAgent, plus a server that is either a standalone mock or a live bridge to HQ.",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node scripts/dev.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build": "pnpm --filter ui build",
+    "typecheck": "pnpm -r typecheck",
+    "serve": "pnpm --filter server start"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

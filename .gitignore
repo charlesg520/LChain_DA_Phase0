@@ -9,3 +9,5 @@ node_modules/
 .next/
 secrets/*
 !secrets/*.example
+web/ui/dist/
+web/server/data/
