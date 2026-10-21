@@ -542,7 +542,7 @@ export class MockBackend {
   /** @param {import("express").Router} r */
   routes(r) {
     r.get("/history", (_req, res) => {
-      res.json({ runs: this.history.map((h) => ({ id: h.id, title: h.title, updated_at: h.updated_at })) });
+      res.json({ runs: this.history.map((h) => ({ id: h.id, title: h.title, updated_at: h.updated_at })).sort((a, b) => b.updated_at - a.updated_at) });
     });
     r.get("/history/:id", (req, res) => {
       const live = this.runs.get(req.params.id);

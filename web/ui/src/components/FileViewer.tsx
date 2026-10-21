@@ -83,6 +83,9 @@ export function FileViewer({ path, onClose }: { path: string; onClose?: () => vo
   );
 }
 
+// Android Chrome and some others report false and would show a blank frame.
+const pdfInline = typeof navigator === "undefined" || (navigator as Navigator & { pdfViewerEnabled?: boolean }).pdfViewerEnabled !== false;
+
 function Body({ result, url, mode, isMd }: { result: FsResult; url: string; mode: "source" | "rendered"; isMd: boolean }) {
   const mime = result.mime || "";
   if (mime.startsWith("image/")) {
@@ -114,7 +117,17 @@ function Body({ result, url, mode, isMd }: { result: FsResult; url: string; mode
             open in a new tab
           </a>
         </div>
-        <iframe title={result.path} src={url} className="min-h-0 w-full flex-1 border-0 bg-white" />
+        {pdfInline ? (
+          <iframe title={result.path} src={url} className="min-h-0 w-full flex-1 border-0 bg-white" />
+        ) : (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-[13px] text-muted">
+            <FileWarning className="h-6 w-6" />
+            This browser can't show PDFs inline (phones usually can't).
+            <a className="btn btn-sm" href={url} target="_blank" rel="noreferrer">
+              open the PDF
+            </a>
+          </div>
+        )}
       </div>
     );
   }

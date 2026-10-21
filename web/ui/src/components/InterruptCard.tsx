@@ -1,9 +1,33 @@
 import { CircleCheck, CircleX, PencilLine, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { pretty } from "../lib/format";
-import { useStore } from "../store";
+import { useStore, type InterruptOutcome } from "../store";
 import { JsonBlock } from "./Code";
 import { Tag, cx } from "./ui";
+
+/**
+ * The collapsed form of an approval once you've answered it: icon, tool, outcome
+ * badge and your note. Shown in place of the card, and kept on the tool's card in
+ * the transcript afterwards.
+ */
+export function DecisionRow({ outcome, inline }: { outcome: Pick<InterruptOutcome, "tool" | "action" | "edited" | "note">; inline?: boolean }) {
+  const approved = outcome.action === "approve";
+  const label = approved ? (outcome.edited ? "approved with edits" : "approved") : "rejected";
+  return (
+    <div
+      data-decision={label}
+      className={cx(
+        "flex min-w-0 items-center gap-2 text-[12.5px]",
+        inline ? "border-t border-info/25 bg-info/[0.05] px-2.5 py-1.5" : "rounded-card border border-info/40 bg-info/[0.06] px-3 py-2",
+      )}
+    >
+      {approved ? <CircleCheck className="h-4 w-4 shrink-0 text-ok" /> : <CircleX className="h-4 w-4 shrink-0 text-err" />}
+      <span className="shrink-0 font-mono text-text">{outcome.tool}</span>
+      <Tag tone={approved ? "ok" : "err"}>{label}</Tag>
+      {outcome.note && <span className="min-w-0 truncate text-muted" title={outcome.note}>“{outcome.note}”</span>}
+    </div>
+  );
+}
 
 /** Human-in-the-loop approval, pinned at the tail of the stream. */
 export function InterruptCard() {
@@ -26,17 +50,7 @@ export function InterruptCard() {
 
   if (!intr) return null;
 
-  if (outcome && outcome.interrupt_id === intr.interrupt_id) {
-    const approved = outcome.action === "approve";
-    return (
-      <div className="flex items-center gap-2 rounded-card border border-info/40 bg-info/[0.06] px-3 py-2 text-[12.5px]">
-        {approved ? <CircleCheck className="h-4 w-4 text-ok" /> : <CircleX className="h-4 w-4 text-err" />}
-        <span className="font-mono text-text">{intr.tool}</span>
-        <Tag tone={approved ? "ok" : "err"}>{approved ? (outcome.edited ? "approved with edits" : "approved") : "rejected"}</Tag>
-        {outcome.note && <span className="truncate text-muted">“{outcome.note}”</span>}
-      </div>
-    );
-  }
+  if (outcome && outcome.interrupt_id === intr.interrupt_id) return <DecisionRow outcome={outcome} />;
 
   let parsed: Record<string, unknown> | null = null;
   let parseError = "";

@@ -97,7 +97,7 @@ export function ConsolePanel({ compact }: { compact?: boolean }) {
           className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-accent/50 bg-panel px-3 py-1 text-[11.5px] text-accent shadow-lg"
           onClick={() => setUi({ console_follow: true })}
         >
-          <ArrowDown className="h-3.5 w-3.5" /> paused · resume auto-scroll
+          <ArrowDown className="h-3.5 w-3.5" /> paused · jump to latest
         </button>
       )}
     </div>

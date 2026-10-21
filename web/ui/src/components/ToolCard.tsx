@@ -5,6 +5,7 @@ import { langFor } from "../lib/highlight";
 import { useStore } from "../store";
 import type { Message, ToolCall } from "../types";
 import { CodeView, JsonBlock } from "./Code";
+import { DecisionRow } from "./InterruptCard";
 import { Markdown } from "./Markdown";
 import { CopyButton, Spinner, Tag, cx } from "./ui";
 
@@ -66,15 +67,11 @@ export const ToolCard = memo(function ToolCard({ call, result }: { call: ToolCal
           </Tag>
         )}
         {status === "approval" && <Tag tone="warn">awaiting approval</Tag>}
-        {decision && status !== "approval" && (
-          <Tag tone={decision.action === "approve" ? "ok" : "err"} title={decision.note}>
-            {decision.action === "approve" ? (decision.edited ? "approved · edited" : "approved") : "rejected"}
-          </Tag>
-        )}
         {elapsed !== null && status !== "pending" && status !== "approval" && (
           <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted">{duration(elapsed)}</span>
         )}
       </button>
+      {decision && status !== "approval" && <DecisionRow outcome={decision} inline />}
       {expanded && (
         <div className="space-y-2.5 border-t border-border bg-[#0d121a] p-2.5">
           <div>

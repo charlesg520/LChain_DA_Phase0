@@ -1,10 +1,21 @@
-import { CircleCheck, CircleDashed, ListChecks, LoaderCircle } from "lucide-react";
+import { CircleCheck, CircleDashed, CircleDot, ListChecks, LoaderCircle } from "lucide-react";
+import { useStore } from "../store";
 import type { Todo } from "../types";
 import { cx } from "./ui";
 
 export function TodoIcon({ status, className }: { status: Todo["status"]; className?: string }) {
+  // Only spin while the agent is actually working; a run that ended (or was
+  // stopped/rejected) leaves its in-progress step as it was, without motion.
+  const working = useStore((s) => s.run.status === "running");
   if (status === "completed") return <CircleCheck className={cx("h-4 w-4 shrink-0 text-ok", className)} />;
-  if (status === "in_progress") return <LoaderCircle className={cx("h-4 w-4 shrink-0 animate-spin text-accent", className)} />;
+  if (status === "in_progress")
+    return working ? (
+      <LoaderCircle className={cx("h-4 w-4 shrink-0 animate-spin text-accent", className)} />
+    ) : (
+      <span title="in progress when the run stopped" className="inline-flex shrink-0">
+        <CircleDot className={cx("h-4 w-4 shrink-0 text-accent/70", className)} />
+      </span>
+    );
   return <CircleDashed className={cx("h-4 w-4 shrink-0 text-muted/70", className)} />;
 }
 
