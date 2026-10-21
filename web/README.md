@@ -35,6 +35,7 @@ pnpm build          # ui/dist, served by the server in production
 - **Parallel chats (live):** you can open other chats or start a new one while HQ works; a banner links back to any chat that's still working or waiting for approval. After a page reload you land in it automatically.
 - **Recovery:** runs continue in HQ if the console restarts; on start it re-attaches to running chats and re-offers pending approvals from the last 14 days.
 - **History** lists the newest 500 chats (Aegra pages by creation time).
+- **Providers with broken streaming:** with `MODEL_STREAMING=false` on the agent, model calls are plain request/response; replies appear whole (no word-by-word), while tools, sub-agents, plan and approvals still update live.
 - **Token counts** come from the provider's usage report; a provider that leaves `input_tokens` out of its stream end reports 0 in.
 - **Media previews:** images, H.264 video, audio and PDF preview in the browser; anything else can be downloaded.
 - **Settings** live in `localStorage["deepagent.settings"]` (host, ws path, token, accent); UI layout prefs are kept separately.

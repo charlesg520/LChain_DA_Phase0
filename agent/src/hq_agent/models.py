@@ -14,11 +14,17 @@ def is_local(spec: str) -> bool:
 
 
 def build_model(spec: str, routing: ModelRouting) -> BaseChatModel:
-    """Turn a `provider:model` string into a chat model instance."""
+    """Turn a `provider:model` string into a chat model instance.
+
+    With MODEL_STREAMING=false every call is a plain request/response, even while
+    the run itself is streamed to the console: replies then arrive whole instead
+    of word by word. Use it for providers whose streaming is broken.
+    """
+    extra = {} if routing.streaming else {"disable_streaming": True}
     if is_local(spec):
         _, model_name = spec.split(":", 1)
-        return init_chat_model(model_name, model_provider="ollama", base_url=routing.ollama_base_url)
-    return init_chat_model(spec)
+        return init_chat_model(model_name, model_provider="ollama", base_url=routing.ollama_base_url, **extra)
+    return init_chat_model(spec, **extra)
 
 
 def resolve_role(spec: str, routing: ModelRouting) -> tuple[str | BaseChatModel, list[AgentMiddleware]]:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import uuid
 
@@ -52,6 +53,9 @@ REVIEWER = [
     ("**blocker** `demo/calc.py:2`: `add` returns `a - b`. Use `a + b`.", None),
 ]
 GENERIC = [("Done.", None)]
+
+# FAKE_STREAM_BUG=1 corrupts streamed text the way a real provider did (non-streamed replies stay correct).
+STREAM_BUG = os.environ.get("FAKE_STREAM_BUG") == "1"
 
 # "[scenario:coder-approval]" in the chat: the orchestrator delegates to the coder,
 # whose edit needs approval (an interrupt raised inside a sub-agent).
@@ -135,8 +139,12 @@ async def messages(request: Request):
             elif b["type"] == "text":
                 yield ev("content_block_start", {"type": "content_block_start", "index": i, "content_block": {"type": "text", "text": ""}})
                 words = b["text"].split(" ")
-                for j in range(0, len(words), 3):
-                    piece = " ".join(words[j : j + 3]) + (" " if j + 3 < len(words) else "")
+                pieces = [" ".join(words[j : j + 3]) + (" " if j + 3 < len(words) else "") for j in range(0, len(words), 3)]
+                if STREAM_BUG:
+                    # What C's provider did (2026-10-20): every streamed text piece after the
+                    # first starts with "t", trailing t's go missing, and a lone "t" closes it.
+                    pieces = [p.rstrip("t") if k == 0 else "t" + p.rstrip("t") for k, p in enumerate(pieces)] + ["t"]
+                for piece in pieces:
                     yield ev("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": piece}})
                     await asyncio.sleep(0.03)
             else:

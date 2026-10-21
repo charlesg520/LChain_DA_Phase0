@@ -14,6 +14,8 @@ const URL_ = process.env.HQ_LIVE_URL;
 const TOKEN = process.env.HQ_LIVE_TOKEN || "";
 const skip = !URL_ && "set HQ_LIVE_URL (and HQ_LIVE_TOKEN) to run against a real HQ";
 const WEB = "w".repeat(32);
+// Set HQ_LIVE_NO_STREAM=1 when the agent under test runs with MODEL_STREAMING=false.
+const STREAMING = process.env.HQ_LIVE_NO_STREAM !== "1";
 
 let srv;
 let dataDir;
@@ -56,8 +58,9 @@ test("full run: streaming, todos, sub-agent, approval, sandbox files, history", 
   const project = `webtest-${run_id.slice(0, 6)}`;
   c.send({ type: "chat", run_id, content: "Build calc.py and get it reviewed", project });
 
-  // token streaming of the first assistant message
-  await c.waitFor((f) => f.type === "message" && f.run_id === run_id && f.partial && f.message.role === "assistant", 60000);
+  // token streaming of the first assistant message (not when the agent runs with MODEL_STREAMING=false)
+  if (STREAMING) await c.waitFor((f) => f.type === "message" && f.run_id === run_id && f.partial && f.message.role === "assistant", 60000);
+  else await c.waitFor((f) => f.type === "message" && f.run_id === run_id && f.message.role === "assistant", 60000);
   const todos = await c.waitFor((f) => f.type === "todos" && f.run_id === run_id, 60000);
   assert.equal(todos.todos.length, 3);
 
@@ -86,7 +89,8 @@ test("full run: streaming, todos, sub-agent, approval, sandbox files, history", 
 
   c.send({ type: "interrupt", run_id, interrupt_id: intr.interrupt_id, decision: { action: "approve" } });
   const done = await c.waitFor((f) => f.type === "done" && f.run_id === run_id, 120000);
-  assert.match(done.message.content, /Fixed and verified/);
+  // exact text: catches providers that corrupt streamed text (see fake_llm.py FAKE_STREAM_BUG)
+  assert.ok(done.message.content.includes("`add` subtracted instead of adding. Fixed and verified:"), `final reply text: ${JSON.stringify(done.message.content)}`);
   assert.ok(done.stats.tokens_in > 0 && done.stats.tokens_out > 0);
   const verify = c.frames.find((f) => f.type === "message" && f.message.role === "tool" && /^5\s/.test(f.message.content));
   assert.ok(verify, "the verify step printed 5 after the approved edit");
