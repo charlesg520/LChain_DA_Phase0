@@ -29,3 +29,20 @@ def test_model_streaming_false_turns_streaming_off_everywhere(monkeypatch: pytes
     # a local role with no home machine resolves to the fallback, which must honour it too
     model, middleware = resolve_role("ollama:qwen3:14b", routing)
     assert middleware == [] and model.disable_streaming is True
+
+
+def test_model_thinking_false_sends_thinking_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from langchain_core.messages import HumanMessage
+
+    monkeypatch.setenv("MODEL_THINKING", "false")
+    model = build_model("anthropic:glm-5.3", ModelRouting())
+    payload = model._get_request_payload([HumanMessage("hi")])
+    assert payload["thinking"] == {"type": "disabled"}
+
+
+def test_thinking_left_to_the_provider_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from langchain_core.messages import HumanMessage
+
+    monkeypatch.delenv("MODEL_THINKING", raising=False)
+    payload = build_model("anthropic:glm-5.3", ModelRouting())._get_request_payload([HumanMessage("hi")])
+    assert "thinking" not in payload or payload["thinking"] is None

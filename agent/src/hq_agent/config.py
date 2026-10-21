@@ -64,6 +64,8 @@ class ModelRouting:
     ollama_base_url: str = field(default_factory=lambda: _env("OLLAMA_BASE_URL", ""))
     # false = never ask the model to stream (some providers corrupt streamed text).
     streaming: bool = field(default_factory=lambda: _env_bool("MODEL_STREAMING", True))
+    # false = ask models to skip their reasoning ("thinking") pass. true = provider default.
+    thinking: bool = field(default_factory=lambda: _env_bool("MODEL_THINKING", True))
 
 
 @dataclass(frozen=True)

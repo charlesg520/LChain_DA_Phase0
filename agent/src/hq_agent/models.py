@@ -19,8 +19,13 @@ def build_model(spec: str, routing: ModelRouting) -> BaseChatModel:
     With MODEL_STREAMING=false every call is a plain request/response, even while
     the run itself is streamed to the console: replies then arrive whole instead
     of word by word. Use it for providers whose streaming is broken.
+    MODEL_THINKING=false turns the model's reasoning pass off (faster steps,
+    weaker on hard problems).
     """
-    extra = {} if routing.streaming else {"disable_streaming": True}
+    extra: dict = {} if routing.streaming else {"disable_streaming": True}
+    if not routing.thinking and spec.startswith("anthropic:"):
+        # MODEL_THINKING=false: ask the model to answer without a reasoning pass.
+        extra["thinking"] = {"type": "disabled"}
     if is_local(spec):
         _, model_name = spec.split(":", 1)
         return init_chat_model(model_name, model_provider="ollama", base_url=routing.ollama_base_url, **extra)
