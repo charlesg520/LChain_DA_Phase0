@@ -62,6 +62,9 @@ class ModelRouting:
     researcher: str = field(default_factory=lambda: _env("MODEL_RESEARCHER", "ollama:qwen3:14b"))
     fallback: str = field(default_factory=lambda: _env("MODEL_FALLBACK", "anthropic:claude-haiku-5-5"))
     ollama_base_url: str = field(default_factory=lambda: _env("OLLAMA_BASE_URL", ""))
+    # For `openai:` roles: an OpenAI-compatible endpoint, e.g. https://provider.example/v1.
+    # Empty means api.openai.com. The key comes from OPENAI_API_KEY.
+    openai_base_url: str = field(default_factory=lambda: _env("OPENAI_BASE_URL", ""))
     # false = never ask the model to stream (some providers corrupt streamed text).
     streaming: bool = field(default_factory=lambda: _env_bool("MODEL_STREAMING", True))
     # false = ask models to skip their reasoning ("thinking") pass. true = provider default.

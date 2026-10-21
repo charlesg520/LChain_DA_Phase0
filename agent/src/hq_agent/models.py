@@ -29,6 +29,19 @@ def build_model(spec: str, routing: ModelRouting) -> BaseChatModel:
     if is_local(spec):
         _, model_name = spec.split(":", 1)
         return init_chat_model(model_name, model_provider="ollama", base_url=routing.ollama_base_url, **extra)
+    if spec.startswith("openai:"):
+        # Any OpenAI-compatible endpoint (OPENAI_BASE_URL + OPENAI_API_KEY), e.g. a
+        # provider that serves Claude in OpenAI format. stream_usage asks for the
+        # usage chunk at the end of a stream so token counts work while streaming;
+        # Chat Completions rather than the Responses API, which is what compatible
+        # providers implement.
+        return init_chat_model(
+            spec,
+            base_url=routing.openai_base_url or None,
+            stream_usage=True,
+            use_responses_api=False,
+            **extra,
+        )
     return init_chat_model(spec, **extra)
 
 

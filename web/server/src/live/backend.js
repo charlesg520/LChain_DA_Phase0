@@ -97,7 +97,7 @@ export class LiveBackend {
     } catch (e) {
       this.hub.broadcast({ type: "notice", level: "error", message: `HQ is not answering: ${e.message}` });
     }
-    this.model = info?.models?.orchestrator?.replace(/^anthropic:/, "") || "hq";
+    this.model = info?.models?.orchestrator?.replace(/^[a-z]+:/, "") || "hq";
     const projects = new Set(["default"]);
     try {
       const inv = await this.hq.json("/ops/sandboxes", { timeoutMs: 10000 });

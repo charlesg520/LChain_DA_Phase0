@@ -40,7 +40,7 @@ test("hello and snapshots come from HQ", { skip, timeout: 90000 }, async () => {
   const hello = await c.waitFor((f) => f.type === "hello");
   assert.equal(hello.mode, "live");
   assert.ok(hello.features.includes("approvals"));
-  assert.equal(hello.model, "fake-glm");
+  assert.equal(hello.model, process.env.HQ_LIVE_MODEL || "fake-glm");
   const skills = await c.waitFor((f) => f.type === "skills");
   assert.ok(skills.skills.some((s) => s.name === "test-first-change" && s.category === "coding"));
   const tools = await c.waitFor((f) => f.type === "tools", 60000);

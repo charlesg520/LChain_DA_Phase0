@@ -46,3 +46,18 @@ def test_thinking_left_to_the_provider_by_default(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("MODEL_THINKING", raising=False)
     payload = build_model("anthropic:glm-5.3", ModelRouting())._get_request_payload([HumanMessage("hi")])
     assert "thinking" not in payload or payload["thinking"] is None
+
+
+def test_openai_compatible_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    from langchain_core.messages import HumanMessage
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://provider.example/v1")
+    monkeypatch.setenv("MODEL_STREAMING", "true")
+    model = build_model("openai:claude-opus-5-5", ModelRouting())
+    assert type(model).__name__ == "ChatOpenAI"
+    assert model.model_name == "claude-opus-5-5"
+    assert model.openai_api_base == "https://provider.example/v1"
+    assert model.stream_usage is True and model.use_responses_api is False
+    assert model._should_stream_usage() is True  # streams end with a usage chunk
+    assert model._get_request_payload([HumanMessage("hi")])["model"] == "claude-opus-5-5"
