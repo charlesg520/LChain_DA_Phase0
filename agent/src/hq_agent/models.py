@@ -1,12 +1,18 @@
-"""Model resolution with automatic fallback for local models."""
+"""Model resolution: provider:model strings to chat models, with failover.
+
+Every role's model runs behind `ResilientModelMiddleware` (resilience.py): provider
+SDK retries are switched off here so that retries happen visibly, and the line of
+models to fail over to is built in `resolve_role`.
+"""
 
 from __future__ import annotations
 
-from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware
+from langchain.agents.middleware import AgentMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 
 from hq_agent.config import ModelRouting
+from hq_agent.resilience import Attempt, ResilientModelMiddleware
 
 
 def is_local(spec: str) -> bool:
@@ -28,33 +34,49 @@ def build_model(spec: str, routing: ModelRouting) -> BaseChatModel:
         extra["thinking"] = {"type": "disabled"}
     if is_local(spec):
         _, model_name = spec.split(":", 1)
-        return init_chat_model(model_name, model_provider="ollama", base_url=routing.ollama_base_url, **extra)
-    if spec.startswith("openai:"):
-        # Any OpenAI-compatible endpoint (OPENAI_BASE_URL + OPENAI_API_KEY), e.g. a
-        # provider that serves Claude in OpenAI format. stream_usage asks for the
-        # usage chunk at the end of a stream so token counts work while streaming;
-        # Chat Completions rather than the Responses API, which is what compatible
-        # providers implement.
-        return init_chat_model(
-            spec,
-            base_url=routing.openai_base_url or None,
-            stream_usage=True,
-            use_responses_api=False,
-            **extra,
-        )
-    return init_chat_model(spec, **extra)
+        model = init_chat_model(model_name, model_provider="ollama", base_url=routing.ollama_base_url, **extra)
+    else:
+        # Retries happen in ResilientModelMiddleware, where they can be shown.
+        extra.update(max_retries=0, timeout=routing.timeout)
+        if spec.startswith("openai:"):
+            # Any OpenAI-compatible endpoint (OPENAI_BASE_URL + OPENAI_API_KEY), e.g. a
+            # provider that serves Claude in OpenAI format. stream_usage asks for the
+            # usage chunk at the end of a stream so token counts work while streaming;
+            # Chat Completions rather than the Responses API, which is what compatible
+            # providers implement.
+            extra.update(base_url=routing.openai_base_url or None, stream_usage=True, use_responses_api=False)
+        model = init_chat_model(spec, **extra)
+    if routing.context_tokens > 0:
+        profile = dict(model.profile or {})
+        profile["max_input_tokens"] = routing.context_tokens
+        model = model.model_copy(update={"profile": profile})
+    return model
+
+
+def _label(spec: str) -> str:
+    return spec.split(":", 1)[1] if ":" in spec else spec
 
 
 def resolve_role(spec: str, routing: ModelRouting) -> tuple[str | BaseChatModel, list[AgentMiddleware]]:
-    """Return the model to use for a role plus any middleware it needs.
+    """Return the model to use for a role plus the middleware that keeps it going.
 
-    - Local model with no OLLAMA_BASE_URL configured: use the fallback model outright.
-    - Local model with a URL: use it, and fail over to the fallback model on errors
-      (home machine asleep, model not pulled, timeout).
-    - API model: use as-is.
+    The failover line:
+    - local model with no OLLAMA_BASE_URL: MODEL_FALLBACK outright;
+    - local model with a URL: the local model (no retries: if the home machine is
+      asleep, fail over at once), then MODEL_FALLBACK;
+    - then MODEL_BACKUP, when set and different.
+    API models in the line are retried MODEL_RETRIES times before moving on.
     """
+    line: list[Attempt] = []
     if is_local(spec):
-        if not routing.ollama_base_url:
-            return build_model(routing.fallback, routing), []
-        return build_model(spec, routing), [ModelFallbackMiddleware(build_model(routing.fallback, routing))]
-    return build_model(spec, routing), []
+        if routing.ollama_base_url:
+            line.append(Attempt(build_model(spec, routing), _label(spec), retries=0))
+        line.append(Attempt(build_model(routing.fallback, routing), _label(routing.fallback), retries=routing.retries))
+        used = {routing.fallback}
+    else:
+        line.append(Attempt(build_model(spec, routing), _label(spec), retries=routing.retries))
+        used = {spec}
+    if routing.backup and routing.backup not in used:
+        line.append(Attempt(build_model(routing.backup, routing), _label(routing.backup), retries=routing.retries))
+    middleware = ResilientModelMiddleware(line, base_delay=routing.retry_base, max_delay=routing.retry_max)
+    return line[0].model, [middleware]

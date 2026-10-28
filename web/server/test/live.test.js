@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
@@ -19,15 +20,53 @@ const STREAMING = process.env.HQ_LIVE_NO_STREAM !== "1";
 
 let srv;
 let dataDir;
+// A stand-in ntfy server that records what the console publishes.
+const pushed = [];
+let ntfy;
 before(async () => {
   if (skip) return;
+  ntfy = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      pushed.push({ auth: req.headers.authorization, ...JSON.parse(body || "{}") });
+      res.end("{}");
+    });
+  });
+  await new Promise((r) => ntfy.listen(0, "127.0.0.1", r));
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "hqweb-"));
-  srv = await startServer({ HQ_WEB_MODE: "live", HQ_API_URL: URL_, HQ_API_TOKEN: TOKEN, WEB_TOKEN: WEB, WEB_DATA_DIR: dataDir });
+  srv = await startServer({
+    HQ_WEB_MODE: "live",
+    HQ_API_URL: URL_,
+    HQ_API_TOKEN: TOKEN,
+    WEB_TOKEN: WEB,
+    WEB_DATA_DIR: dataDir,
+    NTFY_URL: `http://127.0.0.1:${/** @type {any} */ (ntfy.address()).port}`,
+    NTFY_TOPIC: "hq-test-topic",
+    NTFY_TOKEN: "tk_ntfy",
+    NTFY_DONE_MIN_SECONDS: "0",
+    HQ_PUBLIC_URL: "https://hq.example",
+  });
 });
 after(() => {
   srv?.stop();
+  ntfy?.close();
   if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
 });
+
+/** Wait for a notification matching pred. */
+async function pushedWhere(pred, ms = 60000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const hit = pushed.find(pred);
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("no matching notification; got: " + JSON.stringify(pushed.map((p) => p.title)));
+}
+
+/** A notification button's link, pointed at the test server instead of the public domain. */
+const local = (url) => srv.url + new URL(url).pathname;
 
 const api = (p, init = {}) =>
   fetch(srv.url + p, { ...init, headers: { authorization: `Bearer ${WEB}`, "content-type": "application/json", ...(init.headers || {}) } }).then(async (r) => ({
@@ -271,4 +310,115 @@ test("an approval raised inside a sub-agent", { skip, timeout: 240000 }, async (
   await api(`/api/sandboxes/${project}/stop`, { method: "POST", body: "{}" });
   await api(`/api/history/${run_id}`, { method: "DELETE" });
   c.close();
+});
+
+test("phone notifications: approve from the notification, then 'finished'", { skip, timeout: 240000 }, async () => {
+  const c = await connect(srv.port, WEB);
+  const hello = await c.waitFor((f) => f.type === "hello");
+  assert.ok(hello.features.includes("notify"));
+  const run_id = randomUUID();
+  const project = `webntfy-${run_id.slice(0, 6)}`;
+  c.send({ type: "chat", run_id, content: "Build calc.py", project });
+  const note = await pushedWhere((p) => p.title === "HQ needs your approval" && p.click?.includes(run_id), 180000);
+  assert.equal(note.topic, "hq-test-topic");
+  assert.equal(note.auth, "Bearer tk_ntfy");
+  assert.match(note.message, /edit_file in "Build calc.py"/);
+  assert.equal(note.click, `https://hq.example/?chat=${run_id}`);
+  const [open, approve, reject] = note.actions;
+  assert.deepEqual([open.label, approve.label, reject.label], ["Open", "Approve", "Reject"]);
+  assert.equal(approve.method, "POST");
+
+  // tapping Approve on the phone
+  const r = await fetch(local(approve.url), { method: "POST" });
+  assert.equal(r.status, 200);
+  assert.match(await r.text(), /Approved/);
+  const done = await c.waitFor((f) => f.type === "done" && f.run_id === run_id, 120000);
+  assert.match(done.message.content, /Fixed and verified/);
+  await pushedWhere((p) => p.title === "HQ finished" && p.click?.includes(run_id));
+
+  // the other button (and the used one) are dead now
+  assert.equal((await fetch(local(reject.url), { method: "POST" })).status, 410);
+  assert.equal((await fetch(local(approve.url), { method: "POST" })).status, 410);
+  assert.equal((await fetch(srv.url + "/api/notify/act/not-a-real-token", { method: "POST" })).status, 410);
+
+  await api(`/api/sandboxes/${project}/stop`, { method: "POST", body: "{}" });
+  await api(`/api/history/${run_id}`, { method: "DELETE" });
+  c.close();
+});
+
+test("settings: notification info and a test notification", { skip, timeout: 30000 }, async () => {
+  const info = await api("/api/notify");
+  assert.equal(info.body.enabled, true);
+  assert.equal(info.body.topic, "hq-test-topic");
+  const sent = await api("/api/notify/test", { method: "POST", body: "{}" });
+  assert.equal(sent.status, 200);
+  await pushedWhere((p) => p.title === "HQ test notification");
+  assert.equal((await fetch(srv.url + "/api/notify")).status, 401, "info needs the console token");
+});
+
+test("a flaky provider: retries are shown, then the run carries on", { skip, timeout: 240000 }, async () => {
+  const c = await connect(srv.port, WEB);
+  await c.waitFor((f) => f.type === "hello");
+  const run_id = randomUUID();
+  c.send({ type: "chat", run_id, content: "Say hi [scenario:flaky]", project: "webflaky" });
+  const retry = await c.waitFor((f) => f.type === "status" && f.run_id === run_id && /retrying/i.test(f.detail || ""), 60000);
+  assert.match(retry.detail, /timed out \(HTTP 524/);
+  assert.match(retry.detail, /\(1\/\d\)/);
+  // the model answered after the retries, and the "retrying" note cleared with it
+  await c.waitFor((f) => f.type === "message" && f.run_id === run_id && f.message.role === "assistant" && !f.partial, 60000);
+  await c.waitFor((f) => f.type === "todos" && f.run_id === run_id, 60000);
+  assert.equal(c.frames.filter((f) => f.type === "error" && f.run_id === run_id).length, 0);
+  c.send({ type: "control", run_id, cmd: "stop" });
+  await c.waitFor((f) => f.type === "done" && f.run_id === run_id, 30000);
+  await api(`/api/sandboxes/webflaky/stop`, { method: "POST", body: "{}" });
+  await api(`/api/history/${run_id}`, { method: "DELETE" });
+  c.close();
+});
+
+test("a provider that stays down: a plain reason in the chat, and a notification", { skip, timeout: 240000 }, async () => {
+  const c = await connect(srv.port, WEB);
+  await c.waitFor((f) => f.type === "hello");
+  const run_id = randomUUID();
+  c.send({ type: "chat", run_id, content: "Say hi [scenario:down]", project: "webdown" });
+  const err = await c.waitFor((f) => f.type === "error" && f.run_id === run_id, 120000);
+  assert.match(err.message, /model provider timed out \(HTTP 524/);
+  assert.ok(err.message.length < 400, "no SDK dump");
+  const sys = c.frames.find((f) => f.type === "message" && f.run_id === run_id && f.message.role === "system");
+  assert.match(sys.message.content, /^Run stopped: The model provider timed out/);
+  await c.waitFor((f) => f.type === "done" && f.run_id === run_id, 10000);
+  const note = await pushedWhere((p) => p.title === "HQ stopped: needs you" && p.click?.includes(run_id));
+  assert.match(note.message, /timed out/);
+  const detail = await api(`/api/history/${run_id}`);
+  assert.ok(detail.body.messages.some((m) => m.role === "system" && /Run stopped/.test(m.content)), "the reason is kept in history");
+  await api(`/api/history/${run_id}`, { method: "DELETE" });
+  c.close();
+});
+
+test("stopping a chat that waits for approval doesn't bring it back after a restart", { skip, timeout: 240000 }, async () => {
+  const c = await connect(srv.port, WEB);
+  await c.waitFor((f) => f.type === "hello");
+  const run_id = randomUUID();
+  const project = `webdismiss-${run_id.slice(0, 6)}`;
+  c.send({ type: "chat", run_id, content: "Build calc.py", project });
+  await c.waitFor((f) => f.type === "interrupt" && f.run_id === run_id, 180000);
+  c.send({ type: "control", run_id, cmd: "stop" });
+  await c.waitFor((f) => f.type === "done" && f.run_id === run_id, 30000);
+  c.close();
+  const { HqClient } = await import("../src/live/hq.js");
+  const hq = new HqClient({ apiUrl: URL_, apiToken: TOKEN });
+  let status = "";
+  for (let i = 0; i < 40 && status !== "idle"; i++) {
+    status = (await hq.json(`/threads/${run_id}`)).status;
+    if (status !== "idle") await new Promise((r) => setTimeout(r, 250));
+  }
+  assert.equal(status, "idle");
+  // and the chat carries on normally afterwards
+  const c2 = await connect(srv.port, WEB);
+  await c2.waitFor((f) => f.type === "hello");
+  c2.send({ type: "chat", run_id, content: "never mind, just say done", project });
+  await c2.waitFor((f) => f.type === "done" && f.run_id === run_id, 120000);
+  assert.equal(c2.frames.filter((f) => f.type === "error" && f.run_id === run_id).length, 0);
+  await api(`/api/sandboxes/${project}/stop`, { method: "POST", body: "{}" });
+  await api(`/api/history/${run_id}`, { method: "DELETE" });
+  c2.close();
 });

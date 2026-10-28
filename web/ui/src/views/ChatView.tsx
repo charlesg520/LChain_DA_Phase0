@@ -20,6 +20,7 @@ export function ChatView() {
   const streaming = useStore((s) => s.run.streaming);
   const todos = useStore((s) => s.run.todos);
   const status = useStore((s) => s.run.status);
+  const statusDetail = useStore((s) => s.run.status_detail);
   const parallel = useStore((s) => Boolean(s.connection.hello?.features?.includes("parallel-chats")));
   const title = useStore((s) => s.run.title);
   const fromHistory = useStore((s) => s.run.from_history);
@@ -126,6 +127,7 @@ export function ChatView() {
                   ))}
                 </span>
                 {status === "paused" ? "paused" : "working"}
+                {statusDetail && status !== "paused" && <span className="text-warn">· {statusDetail}</span>}
               </div>
             )}
             <div className="h-2" />
@@ -182,7 +184,8 @@ function Welcome() {
 /** HQ is still busy (or waiting on you) in a chat you navigated away from. */
 // Right after the page loads (a refresh, or a second device), jump straight into a
 // chat HQ is still working in instead of showing an empty one.
-let autoOpen = true;
+// (Not when the page was opened from a notification link: that names its own chat.)
+let autoOpen = !new URLSearchParams(window.location.search).has("chat");
 setTimeout(() => (autoOpen = false), 8000);
 
 function ElsewhereBanner() {

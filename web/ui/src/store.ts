@@ -83,6 +83,7 @@ type RunState = {
   last_run_ms: number | null;
   now: number;
   from_history: boolean;
+  status_detail: string | null; // what the run is waiting on, e.g. "model provider timed out, retrying…"
 };
 
 const emptyRun = (project: string): RunState => ({
@@ -106,6 +107,7 @@ const emptyRun = (project: string): RunState => ({
   last_run_ms: null,
   now: Date.now(),
   from_history: false,
+  status_detail: null,
 });
 
 type UiPersist = { sidebar_collapsed: boolean; dock: boolean; dock_tab: DockTab; toolkit_tab: ToolkitTab; project: string };
@@ -312,7 +314,7 @@ export const useStore = create<State>()((set, get) => ({
         return;
       case "message":
         set((st) => {
-          let run = upsert(clearOutcome(st.run), f.message, f.partial);
+          let run = upsert(clearOutcome({ ...st.run, status_detail: null }), f.message, f.partial);
           if (run.status === "idle") run = { ...run, status: "running" };
           return { run };
         });
@@ -360,7 +362,7 @@ export const useStore = create<State>()((set, get) => ({
         set((st) => ({ run: { ...st.run, stats: f.stats } }));
         return;
       case "status":
-        set((st) => ({ run: { ...st.run, status: f.status } }));
+        set((st) => ({ run: { ...st.run, status: f.status, status_detail: f.detail !== undefined ? f.detail : st.run.status_detail } }));
         return;
       case "done":
         set((st) => {
@@ -371,6 +373,7 @@ export const useStore = create<State>()((set, get) => ({
             run: {
               ...run,
               status: "idle",
+              status_detail: null,
               streaming: null,
               stats: f.stats,
               last_run_ms: ms,

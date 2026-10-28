@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Dock, Header, Rail } from "./components/Shell";
 import { Toasts } from "./components/Toasts";
+import { openHistory } from "./lib/history";
 import { useStore } from "./store";
 import { AgentsView } from "./views/AgentsView";
 import { ChatView } from "./views/ChatView";
@@ -30,6 +31,23 @@ export function App() {
   const width = useWidth();
   const narrow = width < 768;
   const overlayDock = width < 1280;
+  const hello = useStore((s) => s.connection.hello);
+
+  // On phones and small screens the dock is an overlay: start with it closed so the chat shows.
+  useEffect(() => {
+    if (window.innerWidth < 1280 && useStore.getState().ui.dock) useStore.getState().setUi({ dock: false });
+  }, []);
+
+  // Deep link from a notification: /?chat=<id> opens that chat once connected.
+  useEffect(() => {
+    if (!hello) return;
+    const url = new URL(window.location.href);
+    const id = url.searchParams.get("chat");
+    if (!id) return;
+    url.searchParams.delete("chat");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+    void openHistory(id);
+  }, [hello]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

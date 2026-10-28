@@ -114,8 +114,29 @@ def usage(body: dict) -> dict:
     return {"input_tokens": max(1, len(json.dumps(body)) // 4), "output_tokens": 0}
 
 
+# Provider trouble, chosen by a marker in the chat:
+#   [scenario:flaky]  the first two calls answer like Cloudflare's 524, then it works
+#   [scenario:down]   every call answers 524
+_FLAKY_LEFT = {"n": 2}
+
+
+def outage(body: dict):
+    text = json.dumps(body.get("messages", []))
+    if "[scenario:down]" in text or ("[scenario:flaky]" in text and _FLAKY_LEFT["n"] > 0):
+        if "[scenario:flaky]" in text:
+            _FLAKY_LEFT["n"] -= 1
+        return JSONResponse(
+            {"type": "https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/", "title": "Error 524: A timeout occurred", "status": 524},
+            status_code=524,
+            headers={"retry-after": "1"},
+        )
+    return None
+
+
 async def messages(request: Request):
     body = await request.json()
+    if (down := outage(body)) is not None:
+        return down
     agent, (text, tool) = plan(body)
     content = blocks(agent, text, tool)
     stop = "tool_use" if tool else "end_turn"
@@ -178,6 +199,8 @@ def plan_openai(body: dict):
 
 async def chat_completions(request: Request):
     body = await request.json()
+    if (down := outage(body)) is not None:
+        return down
     agent, (text, tool) = plan_openai(body)
     cid = "chatcmpl-" + uuid.uuid4().hex[:20]
     model = body.get("model")

@@ -14,9 +14,10 @@ import { CopyButton, Tag, cx } from "./ui";
 export const MessageRow = memo(function MessageRow({ m, messages, streaming }: { m: Message; messages: Message[]; streaming: boolean }) {
   if (m.role === "user") return <UserRow m={m} />;
   if (m.role === "system") {
+    const stopped = m.content.startsWith("Run stopped:");
     return (
-      <div className="flex items-center justify-center gap-2 py-1 text-[12px] text-muted">
-        <Info className="h-3.5 w-3.5" /> <span className="max-w-[80%] truncate">{m.content}</span>
+      <div className={cx("flex items-start justify-center gap-2 py-1 text-[12px]", stopped ? "text-warn" : "text-muted")}>
+        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span className="max-w-[80%] text-center">{m.content}</span>
       </div>
     );
   }

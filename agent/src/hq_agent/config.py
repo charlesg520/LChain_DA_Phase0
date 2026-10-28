@@ -69,6 +69,19 @@ class ModelRouting:
     streaming: bool = field(default_factory=lambda: _env_bool("MODEL_STREAMING", True))
     # false = ask models to skip their reasoning ("thinking") pass. true = provider default.
     thinking: bool = field(default_factory=lambda: _env_bool("MODEL_THINKING", True))
+    # Flaky providers: transient failures (timeouts, 429, 5xx incl. Cloudflare 524) are
+    # retried this many times per model, waiting base*2^n seconds (or the provider's
+    # Retry-After) capped at retry_max, and announced in the console while waiting.
+    retries: int = field(default_factory=lambda: _env_int("MODEL_RETRIES", 3))
+    retry_base: float = field(default_factory=lambda: _env_float("MODEL_RETRY_BASE_SECONDS", 15.0))
+    retry_max: float = field(default_factory=lambda: _env_float("MODEL_RETRY_MAX_SECONDS", 120.0))
+    # Longest silence allowed from the provider during one call before it counts as a timeout.
+    timeout: float = field(default_factory=lambda: _env_float("MODEL_TIMEOUT_SECONDS", 300.0))
+    # Optional model to switch to when a role's model keeps failing (e.g. another provider).
+    backup: str = field(default_factory=lambda: _env("MODEL_BACKUP", ""))
+    # Treat models as having this context window (tokens), so long chats get summarized
+    # sooner (at ~85%). 0 = the model's own window (summaries at ~170k tokens if unknown).
+    context_tokens: int = field(default_factory=lambda: _env_int("MODEL_CONTEXT_TOKENS", 0))
 
 
 @dataclass(frozen=True)

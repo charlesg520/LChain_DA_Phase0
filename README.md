@@ -129,6 +129,10 @@ Open `https://<HQ_DOMAIN>/` and paste your token in Settings (`HQ_API_TOKEN`, or
 | Console | Every frame from the server, filterable, for debugging. |
 | Settings | Connection, accent colour, sandboxes (pin, stop). |
 
+**Notifications:** HQ can't message you between runs, so the console does. With `NTFY_TOPIC` set (`make init` generates one), your phone gets an [ntfy](https://ntfy.sh) notification when a longer run finishes, when a run stops on an error, and when HQ needs your approval (with Approve / Reject buttons). Tapping one opens that chat. Subscribe to the topic shown in Settings → Notifications and press "send a test".
+
+**Flaky providers:** model calls that time out or hit 429/5xx (including Cloudflare's 524) are retried with backoff (`MODEL_RETRIES`, `MODEL_TIMEOUT_SECONDS`), and the chat shows "the model provider timed out, retrying in 30s (1/3)" while it waits. Set `MODEL_BACKUP` to switch models when one keeps failing. If every try fails, the chat says why in one line and you get a notification. `MODEL_CONTEXT_TOKENS` makes long chats summarize sooner, which keeps each step small.
+
 Runs keep going in HQ if the browser or the console restarts: reopening the page drops you back into a chat HQ is still working in, pending approvals included. **Pause** stops at the next step and **Resume** continues from the checkpoint (a step that was cut off runs again). Tools listed in `HQ_REQUIRE_APPROVAL`, and any MCP tool in a server's `approve` list, wait for you: approve, approve with edited arguments, or reject with a note the agent reads.
 
 Develop the UI without the agent: `make web-dev` runs it against a scripted mock server on http://localhost:5173.

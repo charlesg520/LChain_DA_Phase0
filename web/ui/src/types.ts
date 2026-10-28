@@ -145,7 +145,8 @@ export type DoneFrame = { type: "done"; run_id: string; message?: Message; stats
 export type ErrorFrame = { type: "error"; run_id?: string; message: string; code?: string };
 export type PongFrame = { type: "pong"; ts: number };
 // HQ extension: run lifecycle acknowledgements (paused/resumed) and toasts from the server
-export type StatusFrame = { type: "status"; run_id: string; status: "running" | "paused" | "idle" };
+// HQ extension: `detail` says what the run is waiting on (e.g. the model provider timing out); null clears it.
+export type StatusFrame = { type: "status"; run_id: string; status: "running" | "paused" | "idle"; detail?: string | null };
 export type NoticeFrame = { type: "notice"; level: "info" | "ok" | "warn" | "error"; message: string };
 
 export type Downlink =

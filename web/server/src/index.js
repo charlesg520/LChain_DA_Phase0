@@ -54,6 +54,13 @@ const backend =
         apiToken: env.HQ_API_TOKEN || "",
         dataDir: env.WEB_DATA_DIR || path.join(HERE, "..", "data"),
         assistant: env.HQ_ASSISTANT || "hq",
+        notify: {
+          url: env.NTFY_URL,
+          topic: env.NTFY_TOPIC,
+          token: env.NTFY_TOKEN,
+          publicUrl: env.HQ_PUBLIC_URL,
+          doneMinSeconds: env.NTFY_DONE_MIN_SECONDS ? Number(env.NTFY_DONE_MIN_SECONDS) : undefined,
+        },
       })
     : new (await import("./mock/backend.js")).MockBackend(hub);
 
@@ -81,6 +88,9 @@ function authorized(req) {
 }
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, mode: MODE, version: VERSION, auth: Boolean(TOKEN) }));
+
+// Public routes (no console token), e.g. one-time notification buttons.
+if (backend.publicRoutes) backend.publicRoutes(app);
 
 const api = express.Router();
 api.use((req, res, next) => (authorized(req) ? next() : res.status(401).json({ error: "invalid or missing token" })));

@@ -28,7 +28,9 @@ def test_model_streaming_false_turns_streaming_off_everywhere(monkeypatch: pytes
     assert build_model("anthropic:glm-5.3", routing).disable_streaming is True
     # a local role with no home machine resolves to the fallback, which must honour it too
     model, middleware = resolve_role("ollama:qwen3:14b", routing)
-    assert middleware == [] and model.disable_streaming is True
+    assert model.disable_streaming is True
+    assert [type(m).__name__ for m in middleware] == ["ResilientModelMiddleware"]
+    assert middleware[0].labels == ["glm-5.3"]
 
 
 def test_model_thinking_false_sends_thinking_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

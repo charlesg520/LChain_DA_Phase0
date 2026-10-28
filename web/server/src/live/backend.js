@@ -14,8 +14,10 @@ import path from "node:path";
 import { VERSION, uid } from "../util.js";
 import { ChunkBuffer, msTimes, skillKeyFromPath, splitContent, toMessage, toSkill } from "./convert.js";
 import { HqClient, HqError } from "./hq.js";
+import { Notifier } from "./notify.js";
 
-const STREAM_MODE = ["messages-tuple", "updates"];
+// "custom" carries HQ's own events, e.g. "the model provider timed out, retrying in 30s".
+const STREAM_MODE = ["messages-tuple", "updates", "custom"];
 const STREAM_FLUSH_MS = 80;
 const STATS_MS = 2000;
 const MCP_POLL_MS = 1000;
@@ -27,9 +29,9 @@ const HISTORY_MAX = 500;
 export class LiveBackend {
   /**
    * @param {{broadcast:(f:any)=>void}} hub
-   * @param {{apiUrl:string, apiToken:string, dataDir:string, assistant:string}} opts
+   * @param {{apiUrl:string, apiToken:string, dataDir:string, assistant:string, notify?: any}} opts
    */
-  constructor(hub, { apiUrl, apiToken, dataDir, assistant }) {
+  constructor(hub, { apiUrl, apiToken, dataDir, assistant, notify }) {
     this.mode = "live";
     this.hub = hub;
     this.hq = new HqClient({ apiUrl, apiToken });
@@ -42,6 +44,7 @@ export class LiveBackend {
     this.loadedSkills = new Set(); // "category/name" read during the latest run
     this.skillsCache = [];
     this.model = "";
+    this.notifier = new Notifier(notify || {});
     this.recovered = this._recover().catch((e) => console.error("could not recover runs in progress:", e?.message || e));
   }
 
@@ -69,7 +72,7 @@ export class LiveBackend {
         run.title ||= t.metadata?.title || "";
         if (status === "interrupted") {
           run.begin();
-          if (!(await run._pendingFromState())) {
+          if (!(await run._pendingFromState(true))) {
             run.active = false;
             clearInterval(run.statsTimer);
             continue;
@@ -110,7 +113,7 @@ export class LiveBackend {
       version: `${VERSION} · hq ${info?.version || "?"}`,
       model: this.model,
       mode: "live",
-      features: ["skill-studio", "skill-enable", "pause", "approvals", "projects", "parallel-chats"],
+      features: ["skill-studio", "skill-enable", "pause", "approvals", "projects", "parallel-chats", ...(this.notifier.enabled ? ["notify"] : [])],
       projects: [...projects],
     };
   }
@@ -130,7 +133,7 @@ export class LiveBackend {
     await this.recovered;
     for (const run of this.runs.values()) {
       if (!run.active) continue;
-      client.send({ type: "status", run_id: run.id, status: run.paused ? "paused" : "running" });
+      client.send({ type: "status", run_id: run.id, status: run.paused ? "paused" : "running", ...(run.lastDetail ? { detail: run.lastDetail } : {}) });
       if (run.todos.length) client.send({ type: "todos", run_id: run.id, todos: run.todos });
       client.send({ type: "stats", run_id: run.id, stats: run.stats });
       for (const f of run.pendingFrames()) client.send(f);
@@ -381,6 +384,23 @@ export class LiveBackend {
   }
 
   // ------------------------------------------------------------------ REST
+  /**
+   * Routes without the console token: the Approve/Reject buttons on a phone
+   * notification. Each link is a one-time, unguessable token for one approval.
+   * @param {import("express").Express} app
+   */
+  publicRoutes(app) {
+    app.post("/api/notify/act/:token", async (req, res) => {
+      const hit = this.notifier.takeAction(req.params.token);
+      if (!hit) return res.status(410).type("text").send("This button has expired or was already used. Open HQ to decide.");
+      const run = this.runs.get(hit.runId);
+      const pending = run?.interrupts.some((x) => x.ids.includes(hit.interruptId) && x.decisions.length <= x.ids.indexOf(hit.interruptId));
+      if (!run || !pending) return res.status(409).type("text").send("Already decided. Open HQ to see what happened.");
+      run.decide(hit.interruptId, { action: hit.action, note: hit.action === "reject" ? "rejected from a phone notification" : undefined });
+      res.type("text").send(hit.action === "approve" ? "Approved. HQ is continuing." : "Rejected. HQ has been told.");
+    });
+  }
+
   /** @param {import("express").Router} r */
   routes(r) {
     const wrap = (fn) => async (req, res) => {
@@ -403,6 +423,16 @@ export class LiveBackend {
       await this._broadcastSkills();
       this._refreshTools();
     };
+
+    r.get("/notify", (_req, res) => res.json(this.notifier.info()));
+    r.post(
+      "/notify/test",
+      wrap(async () => {
+        if (!this.notifier.enabled) throw new HqError(400, "notifications are off: set NTFY_TOPIC for the web service");
+        if (!(await this.notifier.test())) throw new HqError(502, `ntfy did not accept it: ${this.notifier.lastError}`);
+        return this.notifier.info();
+      }),
+    );
 
     r.get(
       "/history",
@@ -577,6 +607,7 @@ class Run {
 
   /** Emit a message (main flow or a sub-agent's inner stream). */
   _emitMessage(m, partial) {
+    this.lastDetail = null; // the model answered; any "retrying…" note is stale
     const msg = this._store(m);
     if (msg.subagent_id) {
       this.emit({ type: "task", run_id: this.id, event: "inner", inner_id: msg.id, message: msg, partial });
@@ -615,6 +646,7 @@ class Run {
           else if (kind === "messages") this._onChunk(Array.isArray(data) ? data[0] : data, Array.isArray(data) ? data[1] : {}, ns);
           else if (kind === "updates") sawInterrupt = this._onUpdates(data, ns) || sawInterrupt;
           else if (kind === "values" && data?.__interrupt__) sawInterrupt = this._onInterrupts(data.__interrupt__, ns) || sawInterrupt;
+          else if (kind === "custom") this._onCustom(data, ns);
           else if (kind === "error") throw new HqError(500, data?.message || data?.error || "run failed");
         }
         break;
@@ -640,12 +672,30 @@ class Run {
     this.finish(false);
   }
 
-  /** Pick up approvals waiting in the thread's state (after a rejoin or a console restart). */
-  async _pendingFromState() {
+  /**
+   * Pick up approvals waiting in the thread's state (after a rejoin or a console restart).
+   * @param {boolean} [quiet] don't notify (a console restart re-finding old approvals)
+   */
+  async _pendingFromState(quiet = false) {
     const state = await this.be.hq.json(`/threads/${this.id}/state`).catch(() => null);
     const list = [...(state?.interrupts || [])];
     for (const t of state?.tasks || []) for (const it of t.interrupts || []) if (!list.some((x) => x.id === it.id)) list.push(it);
-    return list.length ? this._onInterrupts(list, null) : false;
+    return list.length ? this._onInterrupts(list, null, quiet) : false;
+  }
+
+  /** HQ's own stream events (resilience.py): show model retries/switches as they happen. */
+  _onCustom(data, ns) {
+    const kind = data?.hq;
+    if (!kind) return;
+    const where = ns ? " (sub-agent)" : "";
+    let detail = null;
+    if (kind === "model_retry") detail = `The model provider ${data.reason}${where}. Retrying in ${data.delay_s}s (${data.attempt}/${data.of})…`;
+    else if (kind === "model_switch") detail = `${data.from} ${data.reason}${where}; switched to ${data.to}.`;
+    else if (kind === "model_failed") detail = `The model provider ${data.reason}${where}; no tries left.`;
+    if (!detail) return;
+    this.lastDetail = detail;
+    this.emit({ type: "status", run_id: this.id, status: "running", detail });
+    if (kind === "model_switch") this.emit({ type: "notice", level: "warn", message: detail });
   }
 
   _onChunk(chunk, meta, ns) {
@@ -753,8 +803,9 @@ class Run {
   }
 
   // ------------------------------------------------------------- approvals
-  _onInterrupts(list, ns) {
+  _onInterrupts(list, ns, quiet = false) {
     let any = false;
+    const fresh = [];
     for (const it of Array.isArray(list) ? list : []) {
       const value = it?.value;
       const requests = value?.action_requests;
@@ -763,9 +814,11 @@ class Run {
       if (this.decided.has(it.id)) continue;
       const entry = { lgId: it.id, ns, requests, decisions: [], ids: requests.map((_, i) => `${it.id}:${i}`) };
       this.interrupts.push(entry);
+      fresh.push(entry);
       any = true;
     }
     if (any) for (const f of this.pendingFrames()) this.emit(f);
+    if (!quiet) for (const e of fresh) e.requests.forEach((req, i) => this.be.notifier.approvalNeeded(this, e.ids[i], req.name));
     return any;
   }
 
@@ -855,10 +908,23 @@ class Run {
   async stop() {
     if (this.awaiting) {
       this.interrupts = [];
+      // Stopped instead of decided: let HQ know, or the approval comes back after a console
+      // restart. HQ marks the thread "interrupted" a moment after the stream ends; wait for that.
+      this._dismissWhenSettled();
     } else {
       await this._cancel("cancel");
     }
     this.finish(true);
+  }
+
+  async _dismissWhenSettled() {
+    await this.streaming?.catch(() => {});
+    for (let i = 0; i < 40; i++) {
+      const status = (await this.be.hq.json(`/threads/${this.id}`).catch(() => ({})))?.status;
+      if (status && status !== "busy") break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    await this.be.hq.json(`/ops/threads/${this.id}/dismiss-interrupt`, { body: {} }).catch((e) => console.error("dismiss failed:", e.message));
   }
 
   async pause() {
@@ -912,6 +978,7 @@ class Run {
     const last = this.lastMain ? this.byId.get(this.lastMain) : null;
     const message = !stopped && last && !(last.tool_calls || []).length ? stripFinal(last) : undefined;
     this.emit({ type: "done", run_id: this.id, message, stats: { ...this.stats } });
+    if (!stopped) this.be.notifier.runFinished(this, this.stats.ended_at - this.stats.started_at);
     try {
       this.be.saveTranscript(this);
     } catch (e) {
@@ -920,9 +987,26 @@ class Run {
   }
 
   fail(message) {
-    this.emit({ type: "error", run_id: this.id, message: `HQ: ${message}`, code: "run_failed" });
+    const reason = plainReason(message);
+    // Keep it in the chat too, so the reason is still there when you come back.
+    const note = { id: uid("sys-"), role: "system", content: `Run stopped: ${reason}`, ts: Date.now() };
+    this.addMessage(note);
+    this.emit({ type: "message", run_id: this.id, id: note.id, partial: false, message: note });
+    this.emit({ type: "error", run_id: this.id, message: `HQ: ${reason}`, code: "run_failed" });
+    if (this.active) this.be.notifier.runFailed(this, reason);
     this.finish(true);
   }
+}
+
+/** Provider errors arrive as SDK dumps; keep the sentence a person needs. */
+function plainReason(message) {
+  const s = String(message || "run failed");
+  const code = /Error code: (\d{3})/.exec(s)?.[1] || /\b(52[0-9]|50[0-9]|429)\b/.exec(s)?.[1];
+  if (code && s.length > 200) {
+    const what = code === "524" ? "timed out (HTTP 524)" : code === "429" ? "is rate-limiting us (HTTP 429)" : `returned HTTP ${code}`;
+    return `The model provider ${what}. Send a message to pick up where it left off.`;
+  }
+  return s.length > 400 ? `${s.slice(0, 399)}…` : s;
 }
 
 function stripFinal(m) {

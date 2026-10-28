@@ -16,6 +16,8 @@ GENERATED = {
     "POSTGRES_PASSWORD": lambda: secrets.token_urlsafe(32),
     "SEARXNG_SECRET": lambda: secrets.token_hex(32),
     "GIT_GATEWAY_SECRET": lambda: secrets.token_urlsafe(32),
+    # Phone notifications (ntfy): unguessable topic, since anyone who knows it can read them.
+    "NTFY_TOPIC": lambda: "hq-" + secrets.token_hex(12),
     "HQ_UID": lambda: str(os.getuid()),
     "HQ_GID": lambda: str(os.getgid()),
 }

@@ -363,6 +363,32 @@ async def reopen_interrupt(thread_id: str) -> dict[str, Any]:
     return {"thread_id": thread_id, "status": "interrupted"}
 
 
+@router.post("/threads/{thread_id}/dismiss-interrupt")
+async def dismiss_interrupt(thread_id: str) -> dict[str, Any]:
+    """Mark a thread waiting for approval as idle, when C stops it instead of deciding.
+
+    The console stops the run on its side; without this the thread would stay
+    "interrupted" and come back as a pending approval after every console restart.
+    The next message in that chat starts a fresh run as usual.
+    """
+    try:
+        from sqlalchemy import select
+
+        from aegra_api.api.runs import set_thread_status
+        from aegra_api.core.orm import Thread as ThreadORM
+        from aegra_api.core.orm import _get_session_maker
+    except ImportError as exc:  # pragma: no cover - only outside Aegra
+        raise HTTPException(status_code=501, detail="not running inside Aegra") from exc
+    async with _get_session_maker()() as session:
+        thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+        if thread is None:
+            raise HTTPException(status_code=404, detail="no such thread")
+        if thread.status != "interrupted":
+            return {"thread_id": thread_id, "status": thread.status}
+        await set_thread_status(session, thread_id, "idle")
+    return {"thread_id": thread_id, "status": "idle"}
+
+
 # ------------------------------------------------------------------ mcp + git
 @router.get("/mcp")
 async def mcp_status() -> dict[str, Any]:

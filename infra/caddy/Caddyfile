@@ -30,6 +30,9 @@
 	handle /api/sandboxes* {
 		reverse_proxy web:3000
 	}
+	handle /api/notify* {
+		reverse_proxy web:3000
+	}
 
 	# Agent Protocol + ops API, for scripts and curl. Bearer-token auth is
 	# enforced by the agent itself.

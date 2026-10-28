@@ -1,6 +1,6 @@
 import { Eye, EyeOff, KeyRound, RotateCcw, Save, Settings as SettingsIcon, Wifi } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Dot, Section, Tag, ViewHeader, cx } from "../components/ui";
+import { CopyButton, Dot, Section, Tag, ViewHeader, cx } from "../components/ui";
 import { api } from "../lib/api";
 import { useStore } from "../store";
 import type { Accent, SandboxInfo } from "../types";
@@ -135,12 +135,13 @@ export function SettingsView() {
             </label>
             {conn.hello?.mode === "live" && (
               <p className="border-t border-border px-4 py-3 text-[12px] text-muted">
-                Which tools need approval is set on the server: <span className="font-mono text-text/80">HQ_REQUIRE_APPROVAL=execute,write_file,edit_file</span> in{" "}
-                <span className="font-mono">.env</span>, then <span className="font-mono">make restart</span>.
+                Which tools need approval is set on the server, e.g. <span className="font-mono text-text/80">HQ_REQUIRE_APPROVAL=edit_file,write_file</span> in{" "}
+                <span className="font-mono">.env</span>, then <span className="font-mono">make up</span>. Toolkit → Tools shows which tools ask right now.
               </p>
             )}
           </Section>
 
+          <NotificationsSection />
           <SandboxesSection />
 
           <div className="flex justify-end">
@@ -158,6 +159,63 @@ export function SettingsView() {
         </div>
       </div>
     </div>
+  );
+}
+
+type NotifyInfo = { enabled: boolean; server: string; topic: string; sent: number; last_error: string | null };
+
+/** ntfy phone notifications (live mode): where to subscribe, and a test button. */
+function NotificationsSection() {
+  const conn = useStore((s) => s.connection.status);
+  const toast = useStore((s) => s.toast);
+  const [info, setInfo] = useState<NotifyInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (conn === "open") api<NotifyInfo>("/notify").then(setInfo, () => setInfo(null));
+  }, [conn]);
+  if (!info) return null; // mock mode, or a server without notifications
+  const test = async () => {
+    setBusy(true);
+    try {
+      setInfo(await api<NotifyInfo>("/notify/test", { method: "POST", body: {} }));
+      toast("ok", "Test notification sent; check your phone");
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title="notifications" right={info.enabled ? <Tag tone="ok">on</Tag> : <Tag tone="muted">off</Tag>}>
+      <div className="space-y-2.5 p-4 text-[12.5px]">
+        {info.enabled ? (
+          <>
+            <p className="text-muted">
+              Your phone gets a notification when HQ finishes a longer job, stops on an error, or needs your approval. Tap it to open the chat; approvals have
+              Approve / Reject buttons.
+            </p>
+            <div className="text-muted">In the ntfy app, tap + and subscribe to this topic{info.server !== "https://ntfy.sh" ? ` on ${info.server}` : ""}:</div>
+            <div className="flex items-center gap-2 rounded-card border border-border bg-bg px-3 py-2 font-mono text-[12.5px]">
+              <span className="min-w-0 flex-1 truncate text-text">{info.topic}</span>
+              <CopyButton text={info.topic} />
+            </div>
+            <p className="text-[11.5px] text-muted">Keep the topic private: anyone who knows it can read these notifications (titles and status only).</p>
+            <div className="flex items-center gap-3">
+              <button className="btn btn-sm" onClick={() => void test()} disabled={busy}>
+                send a test
+              </button>
+              <span className="font-mono text-[11px] text-muted">sent {info.sent}</span>
+              {info.last_error && <span className="text-[11.5px] text-err">last error: {info.last_error}</span>}
+            </div>
+          </>
+        ) : (
+          <p className="text-muted">
+            Off. Set <span className="font-mono text-text">NTFY_TOPIC</span> in the server's <span className="font-mono">.env</span> (make init generates one), then{" "}
+            <span className="font-mono">make up</span>.
+          </p>
+        )}
+      </div>
+    </Section>
   );
 }
 

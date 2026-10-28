@@ -89,6 +89,12 @@ services:
       # Optional separate login token for the browser; defaults to HQ_API_TOKEN.
       WEB_TOKEN: ${WEB_TOKEN:-}
       WEB_DATA_DIR: /data/web
+      # Phone notifications via ntfy (empty topic = off). Links in them open this domain.
+      NTFY_URL: ${NTFY_URL:-https://ntfy.sh}
+      NTFY_TOPIC: ${NTFY_TOPIC:-}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
+      NTFY_DONE_MIN_SECONDS: ${NTFY_DONE_MIN_SECONDS:-60}
+      HQ_PUBLIC_URL: https://${HQ_DOMAIN:-localhost}
     volumes:
       - ./data/web:/data/web
     networks: [edge]
